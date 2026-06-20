@@ -1,0 +1,59 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  sprint-zero:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Select pinned Java
+        run: |
+          sudo update-java-alternatives --set java-1.21.0-openjdk-amd64
+          java -version
+      - name: Select pinned Rust
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt,clippy
+          rustup override set 1.88.0
+      - name: Install pinned Buf
+        env:
+          BUF_VERSION: 1.50.1
+        run: |
+          curl --fail --location --silent --show-error "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-x86_64" --output /tmp/buf
+          chmod +x /tmp/buf
+          sudo mv /tmp/buf /usr/local/bin/buf
+          test "$(buf --version)" = "${BUF_VERSION}"
+      - name: Provide pinned librdkafka build headers
+        env:
+          CURL_VERSION: 8.14.1
+        run: |
+          mkdir -p /tmp/craftrelay-curl
+          curl --fail --location --silent --show-error "https://github.com/curl/curl/releases/download/curl-8_14_1/curl-${CURL_VERSION}.tar.xz" | tar -xJ --strip-components=1 -C /tmp/craftrelay-curl
+          echo "C_INCLUDE_PATH=/tmp/craftrelay-curl/include" >> "$GITHUB_ENV"
+      - name: Rust format
+        run: cargo fmt --all -- --check
+      - name: Rust Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Rust tests and shared vectors
+        run: cargo test --workspace --all-features --locked
+      - name: Rust build
+        run: cargo build --workspace --all-features --locked
+      - name: Java verify and shared vectors
+        run: ./java/mvnw -B -ntp clean verify
+      - name: Buf lint
+        run: buf lint
+      - name: Compose validation
+        run: |
+          docker compose -f deployment/compose/compose.yml config --services
+          docker compose -f deployment/compose/compose.yml config --profiles
+      - name: Sprint 0 forbidden runtime dependency scan
+        shell: pwsh
+        run: |
+          $bad = rg -n 'org\.apache\.kafka|org\.postgresql|io\.lettuce|redis\.clients|java\.sql' java --glob '*.java' --glob 'pom.xml'
+          if ($LASTEXITCODE -eq 0) { $bad; exit 1 }
+          if ($LASTEXITCODE -gt 1) { exit $LASTEXITCODE }

@@ -1,0 +1,10 @@
+[package]
+name = "craftrelay-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+craftrelay-domain = { path = "../craftrelay-domain" }
+

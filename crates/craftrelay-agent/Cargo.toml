@@ -1,0 +1,11 @@
+[package]
+name = "craftrelay-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+craftrelay-protocol = { path = "../craftrelay-protocol" }
+rdkafka.workspace = true
+

@@ -1,0 +1,3 @@
+# IntegrationManifest
+
+The manifest binds canonical Paper plugin ID to integration/version, compatible protocol/schema versions, event/query definitions, manifest-issued handles, requested flush preferences, and positive bounded capacities. The host service registry resolves the actual registered plugin mapping to an opaque `RegisteredPluginHandle`; `CraftRelayService.clientFor` accepts that capability rather than a string. Registration then resolves authenticated logical producer identity. Duplicate/conflicting registration fails closed. Plugins cannot invent handles, schemas, producer IDs, topics, retention, durability, priority, projector policy, or reserved P0 capacity. This mapping prevents accidental selector misuse and is not a malicious same-JVM sandbox.

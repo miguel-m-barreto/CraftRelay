@@ -1,0 +1,128 @@
+syntax = "proto3";
+
+package craftrelay.v1;
+
+option java_multiple_files = true;
+option java_package = "io.craftrelay.protocol.v1";
+
+message MetadataEntry { string key = 1; string value = 2; }
+
+message StoredEventEnvelope {
+  string installation_id = 1;
+  string event_id = 2;
+  string producer_id = 3;
+  string producer_instance_id = 4;
+  int64 producer_operation_sequence = 5;
+  string logical_stream_id = 6;
+  int64 stream_sequence = 7;
+  string event_contract_id = 8;
+  int32 schema_version = 9;
+  bytes payload_digest = 10;
+  bytes request_fingerprint = 11;
+  bytes envelope_checksum = 12;
+  repeated MetadataEntry metadata = 13;
+  int64 journal_sequence = 14;
+  string namespace = 15;
+  string logical_stream_type = 16;
+  bytes stream_key_digest = 17;
+  string event_type = 18;
+  string payload_ref_id = 19;
+  int64 payload_length = 20;
+  string payload_encoding = 21;
+  string effective_required_durability = 22;
+  string retention_policy_id = 23;
+  string projection_policy_id = 24;
+  string kafka_topic = 25;
+  reserved 26;
+  reserved "kafka_partition";
+  int64 routing_version = 27;
+  repeated MetadataEntry system_metadata = 28;
+}
+
+message ClientPublishRequest {
+  string event_id = 1;
+  string namespace = 2;
+  string logical_stream_type = 3;
+  string event_type = 4;
+  int32 schema_version = 5;
+  bytes stream_key = 6;
+  string operation_identity = 7;
+  string requested_minimum_durability = 8;
+  bytes typed_payload = 9;
+  repeated MetadataEntry client_metadata = 10;
+  int32 canonicalization_version = 11;
+  string event_contract_handle = 12;
+}
+
+message EventPayloadBlob { string installation_id = 1; string event_id = 2; bytes payload = 3; bytes payload_digest = 4; }
+
+enum PayloadRetentionStatus { PAYLOAD_RETENTION_STATUS_UNSPECIFIED = 0; PAYLOAD_RETENTION_STATUS_PRESENT = 1; PAYLOAD_RETENTION_STATUS_ELIGIBLE = 2; PAYLOAD_RETENTION_STATUS_REMOVED = 3; PAYLOAD_RETENTION_STATUS_INTEGRITY_BLOCKED = 4; }
+message PayloadRetentionState { string event_id = 1; int64 revision = 2; bytes snapshot_checksum = 3; PayloadRetentionStatus status = 4; string retention_basis = 5; }
+
+enum EventDeliveryStatus { EVENT_DELIVERY_STATUS_UNSPECIFIED = 0; EVENT_DELIVERY_STATUS_LOCAL_ACCEPTED = 1; EVENT_DELIVERY_STATUS_PENDING = 2; EVENT_DELIVERY_STATUS_REPLICATED = 3; EVENT_DELIVERY_STATUS_DELIVERY_BLOCKED = 4; }
+message AttemptSummary { int32 attempt_number = 1; string outcome_code = 2; int64 occurred_at_unix_millis = 3; }
+message KafkaDeliveryLocation { string topic = 1; int32 partition = 2; int64 record_offset = 3; }
+message EventDeliveryState { string event_id = 1; int64 revision = 2; bytes snapshot_checksum = 3; EventDeliveryStatus status = 4; repeated AttemptSummary bounded_attempt_summaries = 5; KafkaDeliveryLocation delivery_location = 6; }
+
+enum ProjectionStatus { PROJECTION_STATUS_UNSPECIFIED = 0; PROJECTION_STATUS_NOT_REQUIRED = 1; PROJECTION_STATUS_PENDING = 2; PROJECTION_STATUS_ACKNOWLEDGED = 3; PROJECTION_STATUS_BLOCKED = 4; }
+message ProjectionTrackingState { string event_id = 1; int64 revision = 2; bytes snapshot_checksum = 3; ProjectionStatus status = 4; repeated string required_projector_ids = 5; repeated AttemptSummary bounded_attempt_summaries = 6; }
+
+message PublishLifecycleSnapshot { string event_id = 1; int64 revision = 2; bytes snapshot_checksum = 3; EventDeliveryStatus delivery_status = 4; ProjectionStatus projection_status = 5; PayloadRetentionStatus retention_status = 6; repeated AttemptSummary bounded_attempt_summaries = 7; }
+enum PublishRejectionCode { PUBLISH_REJECTION_CODE_UNSPECIFIED = 0; PUBLISH_REJECTION_CODE_INVALID_REQUEST = 1; PUBLISH_REJECTION_CODE_POLICY = 2; PUBLISH_REJECTION_CODE_CAPACITY = 3; PUBLISH_REJECTION_CODE_NOT_OWNER = 4; PUBLISH_REJECTION_CODE_INTEGRITY_CONFLICT = 5; }
+enum TransportOutcome { TRANSPORT_OUTCOME_UNSPECIFIED = 0; TRANSPORT_OUTCOME_NOT_ACCEPTED = 1; TRANSPORT_OUTCOME_INDETERMINATE = 2; TRANSPORT_OUTCOME_TRACKING_DETACHED = 3; }
+
+message RequestedFlushCriteria { int32 max_records = 1; int64 max_bytes = 2; int64 max_age_millis = 3; }
+message EffectiveFlushCriteria { int32 max_records = 1; int64 max_bytes = 2; int64 max_age_millis = 3; bool flush_on_shutdown_or_drain = 4; }
+enum FlushTriggerSemantics { FLUSH_TRIGGER_SEMANTICS_UNSPECIFIED = 0; FLUSH_TRIGGER_SEMANTICS_ANY_CRITERION_OR = 1; }
+enum FlushPolicyDecision { FLUSH_POLICY_DECISION_UNSPECIFIED = 0; FLUSH_POLICY_DECISION_ACCEPTED = 1; FLUSH_POLICY_DECISION_CLAMPED = 2; FLUSH_POLICY_DECISION_REJECTED = 3; }
+message FlushPolicyResolution { RequestedFlushCriteria requested = 1; EffectiveFlushCriteria effective = 2; FlushPolicyDecision decision = 3; string event_class_policy_id = 4; FlushTriggerSemantics semantics = 5; }
+message InteractiveFlushRequest { string integration_id = 1; string event_contract_handle = 2; int64 timeout_millis = 3; int32 max_accumulators = 4; }
+message InteractiveFlushResult { bool completed = 1; bool scoped = 2; bool kafka_payload_scan_performed = 3; }
+
+enum BatchingKind { BATCHING_KIND_UNSPECIFIED = 0; BATCHING_KIND_PHYSICAL = 1; BATCHING_KIND_SEMANTIC_COALESCING = 2; }
+message BatchingContract { BatchingKind kind = 1; bool preserves_event_identity = 2; bool preserves_lifecycle = 3; bool preserves_dedup = 4; bool preserves_ledger_rows = 5; }
+enum EventClass { EVENT_CLASS_UNSPECIFIED = 0; EVENT_CLASS_P0_LEDGER = 1; EVENT_CLASS_P0_OWNERSHIP = 2; EVENT_CLASS_P0_PREMIUM = 3; EVENT_CLASS_ACTIVITY_DELTA = 4; EVENT_CLASS_DISPLAY = 5; }
+message EventClassPolicy { EventClass event_class = 1; bool semantic_coalescing_allowed = 2; EffectiveFlushCriteria ceilings = 3; int32 reserved_local_capacity = 4; }
+
+message ProjectionAckOutboxRecord { string event_id = 1; string projector_id = 2; string projection_name = 3; int64 projection_revision = 4; bytes ack_checksum = 5; }
+message AgentAckConsumptionContract { bool persist_before_kafka_offset_commit = 1; bool deduplicate = 2; int32 max_batch_records = 3; }
+
+message QueryDefinition { string query_contract_handle = 1; string parameter_schema_id = 2; int32 parameter_schema_version = 3; string result_schema_id = 4; int32 result_schema_version = 5; }
+message GetAccountParameters { string account_id = 1; }
+message QueryParameters { oneof typed_parameters { GetAccountParameters get_account = 1; } }
+
+enum QueryConsistencyMode { QUERY_CONSISTENCY_MODE_UNSPECIFIED = 0; QUERY_CONSISTENCY_MODE_STRICT_LATEST_COMMITTED = 1; QUERY_CONSISTENCY_MODE_AT_LEAST_TOKEN = 2; QUERY_CONSISTENCY_MODE_ALLOW_STALE = 3; }
+message PartitionNextOffset { int32 partition = 1; int64 next_offset = 2; }
+message ProjectionBarrier { int64 topology_version = 1; int64 routing_version = 2; string partition_set_id = 3; repeated PartitionNextOffset required_next_offset = 4; int32 barrier_version = 5; string barrier_id = 6; string installation_id = 7; string query_id = 8; int32 query_definition_version = 9; bytes partition_set_checksum = 10; bytes barrier_checksum = 11; }
+enum CheckpointBlockedState { CHECKPOINT_BLOCKED_STATE_UNSPECIFIED = 0; CHECKPOINT_BLOCKED_STATE_CLEAR = 1; CHECKPOINT_BLOCKED_STATE_GAP = 2; CHECKPOINT_BLOCKED_STATE_POISON = 3; CHECKPOINT_BLOCKED_STATE_INTEGRITY = 4; }
+message ProjectionCheckpoint { string projector_id = 1; string projection_name = 2; int32 partition = 3; int64 next_offset_to_resolve = 4; CheckpointBlockedState blocked_state = 5; int64 revision = 6; bytes snapshot_checksum = 7; }
+message CheckpointOnlyAdvancementContract { bool domain_rows_unchanged = 1; bool archive_rows_unchanged = 2; bool verified_read_committed_gap = 3; int64 new_next_offset_to_resolve = 4; }
+
+message ProjectionMutationRef { string projection_id = 1; string entity_type = 2; string entity_id = 3; int64 domain_version = 4; string topic = 5; int32 partition = 6; int64 required_next_offset = 7; }
+message ProjectionConsistencyToken { int32 token_version = 1; string installation_id = 2; string projector_id = 3; string projection_name = 4; int64 expires_at_unix_millis = 5; int64 topology_version = 6; int64 routing_version = 7; repeated PartitionNextOffset required_next_offset = 8; bytes token_checksum = 9; bytes mac = 10; string issuer_agent_id = 11; string authenticated_producer_id = 12; string event_id = 13; string query_scope = 14; int32 query_definition_version = 15; string projection_policy_id = 16; int32 projection_policy_version = 17; repeated ProjectionMutationRef bounded_mutation_refs = 18; int64 issued_at_unix_millis = 19; string key_id = 20; }
+message GetProjectionConsistencyTokensRequest { string installation_id = 1; string event_id = 2; repeated string bounded_projection_names = 3; int64 timeout_millis = 4; int32 max_tokens = 5; }
+message GetProjectionConsistencyTokensResponse { repeated ProjectionConsistencyToken tokens = 1; bool detached = 2; }
+
+message EntityVersionWatch { string query_contract_handle = 1; string entity_id = 2; int64 after_version = 3; int32 max_buffer_events = 4; int64 max_buffer_bytes = 5; int64 timeout_millis = 6; }
+message BarrierVectorWatch { ProjectionBarrier after_barrier = 1; int32 max_buffer_events = 2; int64 max_buffer_bytes = 3; int64 timeout_millis = 4; }
+enum WatchState { WATCH_STATE_UNSPECIFIED = 0; WATCH_STATE_CURRENT = 1; WATCH_STATE_DETACHED = 2; WATCH_STATE_INCOMPARABLE = 3; WATCH_STATE_CONFLICT = 4; }
+
+enum DisplayQueryMode { DISPLAY_QUERY_MODE_UNSPECIFIED = 0; DISPLAY_QUERY_MODE_PROJECTED_PLUS_LIVE = 1; DISPLAY_QUERY_MODE_LIVE_ONLY = 2; }
+message LiveProjectionCheckpoint { string live_source_id = 1; int64 topology_version = 2; int64 routing_version = 3; repeated PartitionNextOffset next_offset_to_resolve = 4; }
+message LiveSourceMetadata { string source_id = 1; string source_kind = 2; bool authoritative = 3; bool kafka_derived = 4; }
+enum RedisLiveAvailability { REDIS_LIVE_AVAILABILITY_UNSPECIFIED = 0; REDIS_LIVE_AVAILABILITY_AVAILABLE = 1; REDIS_LIVE_AVAILABILITY_REBUILDING = 2; REDIS_LIVE_AVAILABILITY_UNAVAILABLE = 3; }
+message DisplayResultClassification { DisplayQueryMode mode = 1; bool display_only = 2; bool satisfies_strict = 3; bool satisfies_token = 4; LiveSourceMetadata source = 5; LiveProjectionCheckpoint checkpoint = 6; RedisLiveAvailability availability = 7; }
+
+enum BridgeReadiness { BRIDGE_READINESS_UNSPECIFIED = 0; BRIDGE_READINESS_NOT_READY = 1; BRIDGE_READINESS_READY = 2; BRIDGE_READINESS_DEGRADED = 3; }
+message EventContractRegistration { string contract_name = 1; repeated int32 schema_versions = 2; string event_contract_handle = 3; EventClass event_class = 4; RequestedFlushCriteria requested_flush = 5; }
+message QueryContractRegistration { string contract_name = 1; repeated int32 schema_versions = 2; string query_contract_handle = 3; }
+message IntegrationManifest { string integration_id = 1; int32 integration_version = 2; string paper_plugin_id = 3; repeated EventContractRegistration events = 4; repeated QueryContractRegistration queries = 5; int32 max_pending_publishes = 6; int32 max_pending_queries = 7; int32 max_active_watches = 8; }
+message LogicalProducerRegistration { string installation_id = 1; string integration_id = 2; string authenticated_producer_id = 3; string producer_instance_id = 4; int64 next_producer_operation_sequence = 5; }
+
+enum ExecutionContextKind { EXECUTION_CONTEXT_KIND_UNSPECIFIED = 0; EXECUTION_CONTEXT_KIND_GLOBAL_SERVER = 1; EXECUTION_CONTEXT_KIND_ENTITY = 2; EXECUTION_CONTEXT_KIND_REGION = 3; EXECUTION_CONTEXT_KIND_ASYNC_ONLY = 4; }
+message ExecutionContextContract { ExecutionContextKind kind = 1; string owner_plugin_id = 2; bool gameplay_mutation_allowed = 3; }
+message ClassloaderBoundaryContract { bool api_types_only = 1; bool jdk_types_allowed = 2; bool generated_domain_types_exposed = 3; bool grpc_runtime_exposed = 4; }
+message BridgeProducerOwnership { string producer_instance_id = 1; int64 next_producer_operation_sequence = 2; bool bridge_owned = 3; }
+message BridgeCapacityContract { int32 total_pending_capacity = 1; int32 reserved_p0_capacity = 2; int32 per_producer_pending_limit = 3; }
+
+message LocalFirstProgressPolicy { bool immediate_local_visual_feedback = 1; bool asynchronous_delta_publish = 2; bool query_service_reconciliation = 3; bool query_per_gameplay_action = 4; }

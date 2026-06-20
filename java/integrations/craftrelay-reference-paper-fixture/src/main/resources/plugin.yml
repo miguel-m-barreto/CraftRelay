@@ -1,0 +1,7 @@
+name: CraftRelayReferenceFixture
+version: 0.1.0-SNAPSHOT
+main: io.craftrelay.reference.fixture.ReferencePaperFixture
+api-version: '1.21'
+depend: [CraftRelayPaperBridge]
+description: Compile fixture only; not a runnable JavaPlugin yet.
+

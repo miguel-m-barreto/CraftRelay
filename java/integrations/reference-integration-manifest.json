@@ -1,0 +1,2 @@
+{"integration_id":"reference-domain","integration_version":1,"paper_plugin_id":"CraftRelayReferenceFixture","limits":{"max_pending_publishes":64,"max_pending_queries":32,"max_active_watches":16},"events":[{"contract":"reference.progress_delta","schema_versions":[1],"event_class":"ACTIVITY_DELTA","requested_flush":{"max_records":64,"max_bytes":65536,"max_age_millis":1000}}],"queries":[{"contract":"reference.progress","schema_versions":[1]}]}
+

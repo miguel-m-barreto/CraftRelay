@@ -1,0 +1,6 @@
+name: CraftRelayPaperBridge
+version: 0.1.0-SNAPSHOT
+main: io.craftrelay.paper.bridge.BridgeSkeleton
+api-version: '1.21'
+description: Non-functional Sprint 0 service contract; not a runnable plugin main yet.
+

@@ -1,0 +1,74 @@
+# Environment overrides
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+
+# Local-only files
+script.py
+scripts/New-AuditBundle.ps1
+
+# Build outputs and packaged artifacts
+target/
+*.class
+*.jar
+*.war
+*.ear
+
+# Audit bundles and generated archives
+.audit-bundles/
+audit-bundles/
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# Logs, diagnostics, and process files
+*.log
+logs/
+*.pid
+*.hprof
+hs_err_pid*
+replay_pid*
+
+# Local Docker and Minecraft runtime data
+docker-data/
+servers/
+local-server/
+server/
+run/
+world/
+world_nether/
+world_the_end/
+
+# Secrets and credentials
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.csr
+*.jks
+*.keystore
+credentials.json
+credentials.local.json
+secrets.json
+secrets.local.json
+token.local
+private.local
+
+# IDEs and editors
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+.project
+.classpath
+.settings/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini

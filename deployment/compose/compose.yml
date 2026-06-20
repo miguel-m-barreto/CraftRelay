@@ -1,0 +1,71 @@
+name: craftrelay-sprint0
+
+x-kafka-common: &kafka-common
+  image: apache/kafka:3.9.1
+  restart: unless-stopped
+  environment: &kafka-environment
+    KAFKA_PROCESS_ROLES: broker,controller
+    KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093,4@kafka-4:9093,5@kafka-5:9093
+    KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT
+    KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+    KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+    KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 5
+    KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 5
+    KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 5
+    KAFKA_MIN_INSYNC_REPLICAS: 5
+    KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+    KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  networks: [craftrelay]
+
+services:
+  kafka-1:
+    <<: *kafka-common
+    environment: {<<: *kafka-environment, KAFKA_NODE_ID: 1, KAFKA_LISTENERS: "INTERNAL://:9092,CONTROLLER://:9093", KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka-1:9092"}
+    volumes: [kafka-1-data:/var/lib/kafka/data]
+  kafka-2:
+    <<: *kafka-common
+    environment: {<<: *kafka-environment, KAFKA_NODE_ID: 2, KAFKA_LISTENERS: "INTERNAL://:9092,CONTROLLER://:9093", KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka-2:9092"}
+    volumes: [kafka-2-data:/var/lib/kafka/data]
+  kafka-3:
+    <<: *kafka-common
+    environment: {<<: *kafka-environment, KAFKA_NODE_ID: 3, KAFKA_LISTENERS: "INTERNAL://:9092,CONTROLLER://:9093", KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka-3:9092"}
+    volumes: [kafka-3-data:/var/lib/kafka/data]
+  kafka-4:
+    <<: *kafka-common
+    environment: {<<: *kafka-environment, KAFKA_NODE_ID: 4, KAFKA_LISTENERS: "INTERNAL://:9092,CONTROLLER://:9093", KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka-4:9092"}
+    volumes: [kafka-4-data:/var/lib/kafka/data]
+  kafka-5:
+    <<: *kafka-common
+    environment: {<<: *kafka-environment, KAFKA_NODE_ID: 5, KAFKA_LISTENERS: "INTERNAL://:9092,CONTROLLER://:9093", KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka-5:9092"}
+    volumes: [kafka-5-data:/var/lib/kafka/data]
+  postgres:
+    image: postgres:17.5-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: craftrelay
+      POSTGRES_USER: craftrelay
+      POSTGRES_PASSWORD: sprint0-development-only
+    command: ["postgres", "-c", "fsync=on", "-c", "synchronous_commit=on", "-c", "full_page_writes=on"]
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    networks: [craftrelay]
+  prometheus:
+    image: prom/prometheus:v3.4.1
+    restart: unless-stopped
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    networks: [craftrelay]
+  grafana:
+    image: grafana/grafana:12.0.1
+    profiles: [observability]
+    restart: unless-stopped
+    networks: [craftrelay]
+  redis-live:
+    image: redis:8.0.2-bookworm
+    profiles: [live]
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    networks: [craftrelay]
+
+networks: {craftrelay: {}}
+volumes: {kafka-1-data: {}, kafka-2-data: {}, kafka-3-data: {}, kafka-4-data: {}, kafka-5-data: {}, postgres-data: {}}
+

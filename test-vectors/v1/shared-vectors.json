@@ -4,16 +4,23 @@
   "fingerprint": [{"description":"request intent; excludes installation, producer instance/sequence, session, Agent policy/routing, and allocated sequences","canonical_hex":"0001010000002430313839306633652d376234632d376363322d393863382d3366306635663366396234610002010000000a70726f64756365722d610003010000000765636f6e6f6d79000401000000076163636f756e74000501000000087472616e736665720006010000000400000001000701000000096163636f756e742d31000801000000046f702d310009010000000a5245504c494341544544000a010000000a437261667452656c6179000b0100000007613d313b7a3d39000c010000000400000001","sha256":"6594ba4b50597d8746ca7aff3c5e1cab10143239ce41689071e4860b212b8b5d"}],
   "uuid_v7": [
     {"value":"01890f3e-7b4c-7cc2-98c8-3f0f5f3f9b4a","valid":true},
-    {"value":"01890f3e-7b4c-4cc2-98c8-3f0f5f3f9b4a","valid":false}
+    {"value":"01890f3e-7b4c-4cc2-98c8-3f0f5f3f9b4a","valid":false},
+    {"value":"01890F3E-7B4C-7CC2-98C8-3F0F5F3F9B4A","valid":false},
+    {"value":"not-a-uuid","valid":false}
   ],
   "installation_scope": [{"installation_id":"installation-a","name":"same","scoped":"installation-a\u0000same"},{"installation_id":"installation-b","name":"same","scoped":"installation-b\u0000same"}],
+  "metadata_canonicalization": [{"entries":[{"key":"z","value":"last"},{"key":"a","value":"first"}],"canonical":"a=first|z=last","sha256":"efe0f44780d34543dcd2cd3261a94da5b77d794255ce287116b2604acb479fae"}],
+  "metadata_rejections": [{"entries":[{"key":"same","value":"a"},{"key":"same","value":"b"}],"rejection":"DUPLICATE_METADATA_KEY"}],
+  "envelope_input": [{"canonical":"event_id=01890f3e-7b4c-7cc2-98c8-3f0f5f3f9b4a|schema_version=1|metadata=a=first,z=last|payload=02","sha256":"98892a3bb39988b3ec3a948cac9a7d055c50cb37b8ae5bcb4469af846bf10102"}],
   "payload_digest": [{"payload_utf8":"CraftRelay","sha256":"b43a068b8c1f4289ec1a91fce360a3268a17479e509beb715a3790a962d7a750"}],
   "envelope_checksum": [{"canonical":"installation-a\u000001890f3e-7b4c-7cc2-98c8-3f0f5f3f9b4a\u00001","sha256":"452281e1e1270719e44f07d588fc97888407ae9d8373658a007ead3b40869e53"}],
   "revision_checksums": [{"revision":1,"canonical":"1\u0000LOCAL_ACCEPTED","sha256":"3e9242feef2479602f984385e52097eb72ba463541423ce178cdf0699fb1ac91"}],
   "positive_boundaries": {"int32_min":1,"int32_max":2147483647,"int64_min":1,"int64_max":9223372036854775807,"zero_valid":false,"negative_valid":false},
-  "projection_barrier": {"topology_version":3,"routing_version":7,"required_next_offset":{"0":0,"1":42},"exclusive":true},
-  "consistency_token": {"installation_id":"installation-a","projector_id":"projector-a","projection_name":"accounts","expires_at_unix_millis":1893456000000,"checksum_algorithm":"SHA-256","mac_algorithm_placeholder":"HMAC-SHA-256","authenticated":true},
+  "projection_barrier": {"barrier_version":1,"query_definition_version":1,"topology_version":3,"routing_version":7,"canonical":"v=1|topology=3|routing=7|events:0=0|events:1=42","sha256":"d73cf4167cc5ec91769dde542cbeef8ee6c78aefc4eff59a9b332cb1053fa090","required_next_offset":{"0":0,"1":42},"exclusive":true},
+  "consistency_token": {"token_version":1,"installation_id":"installation-a","authenticated_producer_id":"producer-a","projector_id":"projector-a","projection_name":"accounts","query_scope":"account:1","expires_at_unix_millis":1893456000000,"canonical":"v=1|installation=installation-a|producer=producer-a|projector=projector-a|projection=accounts|scope=account:1|expires=1893456000000|events:0=42","checksum":"08096e7b2c0c57df5ec73fc53abd87a896dc494e0d3a1e85e3007f4aaf25a881","fixture_key_utf8":"fixture-hmac-key-material","mac":"0714a7093b8ffec803649c777d5625bd32acddf45f0aaf02cd6616be8d9a855a","checksum_algorithm":"SHA-256","mac_algorithm":"HMAC-SHA-256","authenticated":true},
   "barrier_vector_watch": [{"old":{"0":4,"1":8},"new":{"0":4,"1":9},"comparison":"ADVANCED"},{"old":{"0":4},"new":{"0":4,"1":0},"comparison":"INCOMPARABLE_TOPOLOGY"}],
+  "query_freshness": [{"mode":"STRICT_LATEST_COMMITTED","proof":"UNAVAILABLE","current":false,"authoritative":false,"silent_downgrade":false},{"mode":"ALLOW_STALE","proof":"STALE_ACCEPTED","current":false,"authoritative":false,"silent_downgrade":false}],
+  "watch_freshness": [{"state":"DETACHED","current":false,"reason":"capacity"},{"state":"INCOMPARABLE","current":false,"reason":"topology_changed"}],
   "live_result_metadata": {"source":"KAFKA_DERIVED_REDIS","authoritative":false,"live_checkpoint_separate":true,"fallback":"PROJECTED_OR_EXPLICIT_UNAVAILABLE"},
   "display_classification": [{"mode":"PROJECTED_PLUS_LIVE","display_only":true,"satisfies_strict":false},{"mode":"LIVE_ONLY","display_only":true,"satisfies_strict":false}]
 }

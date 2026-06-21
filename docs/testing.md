@@ -1,5 +1,7 @@
 # Testing
 
+Sprint 1 adds Java/Rust contract tests for UUIDv7, positive numeric bounds, metadata canonicalization and duplicate rejection, immutable envelope input, lifecycle revision conflicts, bounded publish tracking, same-event retry, fake/non-durable status lookup, Bridge registration/readiness, typed reference clients, typed queries, exclusive next-offset barriers, authenticated token scope/expiry/MAC validation, and bounded detachable watches. Fake Agent and Query Service fixtures are in-memory boundary tests only; they provide no durability or authoritative freshness.
+
 Sprint 0 validates formatting, Clippy, Rust unit/shared-vector tests, Java reactor tests, Buf lint, Compose parsing, static forbidden-dependency checks, revision conflict, installation scope, exclusive offsets, strict no-downgrade, bounded tracking, and protocol shape.
 
 The Kafka barrier integration spike requires a prepared real Kafka fixture. Create three fixture partitions: empty, blocked by an open transaction, and containing offset gaps. Set `CRAFTRELAY_KAFKA_BOOTSTRAP`, `CRAFTRELAY_EMPTY_TOPIC`, `CRAFTRELAY_EMPTY_PARTITION`, `CRAFTRELAY_EMPTY_EXPECTED_LSO`, corresponding `CRAFTRELAY_OPEN_TX_*`, and corresponding `CRAFTRELAY_GAP_*` variables. Run `cargo test -p craftrelay-agent --test barrier_capture_kafka -- --ignored --nocapture`. The normal workspace test compiles this test but reports it as ignored; that is compile validation, not real-broker proof. The real-fixture test never polls records and separately proves the open-transaction high watermark is greater than LSO.

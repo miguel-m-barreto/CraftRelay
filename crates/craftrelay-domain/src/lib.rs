@@ -1,9 +1,85 @@
 #![forbid(unsafe_code)]
 
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub type Checksum = [u8; 32];
+
+pub const MAX_METADATA_ENTRIES: usize = 32;
+pub const MAX_METADATA_BYTES: usize = 8_192;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValidationError {
+    InvalidUuid,
+    NonPositiveInt32,
+    NonPositiveInt64,
+    MetadataCountExceeded,
+    MetadataBytesExceeded,
+    InvalidMetadataKey,
+    DuplicateMetadataKey,
+    TokenInvalidMac,
+    TokenExpired,
+    TokenScopeMismatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataEntry {
+    pub key: String,
+    pub value: String,
+}
+
+pub fn positive_i32(value: i32) -> Result<i32, ValidationError> {
+    (value > 0)
+        .then_some(value)
+        .ok_or(ValidationError::NonPositiveInt32)
+}
+
+pub fn positive_i64(value: i64) -> Result<i64, ValidationError> {
+    (value > 0)
+        .then_some(value)
+        .ok_or(ValidationError::NonPositiveInt64)
+}
+
+pub fn canonicalize_metadata(
+    entries: &[MetadataEntry],
+) -> Result<Vec<MetadataEntry>, ValidationError> {
+    if entries.len() > MAX_METADATA_ENTRIES {
+        return Err(ValidationError::MetadataCountExceeded);
+    }
+    let mut keys = BTreeSet::new();
+    let mut total_bytes = 0usize;
+    for entry in entries {
+        if entry.key.is_empty()
+            || !entry.key.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+            })
+        {
+            return Err(ValidationError::InvalidMetadataKey);
+        }
+        if !keys.insert(entry.key.as_bytes().to_vec()) {
+            return Err(ValidationError::DuplicateMetadataKey);
+        }
+        total_bytes = total_bytes
+            .checked_add(entry.key.len() + entry.value.len())
+            .ok_or(ValidationError::MetadataBytesExceeded)?;
+    }
+    if total_bytes > MAX_METADATA_BYTES {
+        return Err(ValidationError::MetadataBytesExceeded);
+    }
+    let mut canonical = entries.to_vec();
+    canonical.sort_by(|left, right| left.key.as_bytes().cmp(right.key.as_bytes()));
+    Ok(canonical)
+}
+
+pub fn canonical_metadata_text(entries: &[MetadataEntry]) -> Result<String, ValidationError> {
+    Ok(canonicalize_metadata(entries)?
+        .iter()
+        .map(|entry| format!("{}={}", entry.key, entry.value))
+        .collect::<Vec<_>>()
+        .join("|"))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredEventEnvelope {
@@ -225,6 +301,31 @@ pub fn sha256(bytes: &[u8]) -> Checksum {
     Sha256::digest(bytes).into()
 }
 
+pub fn hmac_sha256(key: &[u8], message: &[u8]) -> Checksum {
+    const BLOCK_SIZE: usize = 64;
+    let key_material = if key.len() > BLOCK_SIZE {
+        sha256(key).to_vec()
+    } else {
+        key.to_vec()
+    };
+    let mut padded = [0u8; BLOCK_SIZE];
+    padded[..key_material.len()].copy_from_slice(&key_material);
+    let mut inner_pad = [0x36u8; BLOCK_SIZE];
+    let mut outer_pad = [0x5cu8; BLOCK_SIZE];
+    for index in 0..BLOCK_SIZE {
+        inner_pad[index] ^= padded[index];
+        outer_pad[index] ^= padded[index];
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(message);
+    let inner_digest = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner_digest);
+    outer.finalize().into()
+}
+
 pub fn scoped_name(installation_id: &str, name: &str) -> String {
     format!("{installation_id}\0{name}")
 }
@@ -305,5 +406,50 @@ mod tests {
     #[test]
     fn uuid_v7_shape() {
         assert!(is_canonical_uuid_v7("01890f3e-7b4c-7cc2-98c8-3f0f5f3f9b4a"));
+        assert!(!is_canonical_uuid_v7(
+            "01890f3e-7b4c-4cc2-98c8-3f0f5f3f9b4a"
+        ));
+        assert!(!is_canonical_uuid_v7(
+            "01890F3E-7B4C-7CC2-98C8-3F0F5F3F9B4A"
+        ));
+    }
+    #[test]
+    fn positive_numeric_boundaries() {
+        assert_eq!(positive_i32(1), Ok(1));
+        assert_eq!(positive_i32(i32::MAX), Ok(i32::MAX));
+        assert_eq!(positive_i32(0), Err(ValidationError::NonPositiveInt32));
+        assert_eq!(positive_i64(1), Ok(1));
+        assert_eq!(positive_i64(i64::MAX), Ok(i64::MAX));
+        assert_eq!(positive_i64(-1), Err(ValidationError::NonPositiveInt64));
+    }
+    #[test]
+    fn metadata_is_sorted_and_duplicate_keys_are_rejected() {
+        let entries = vec![
+            MetadataEntry {
+                key: "z".into(),
+                value: "last".into(),
+            },
+            MetadataEntry {
+                key: "a".into(),
+                value: "first".into(),
+            },
+        ];
+        assert_eq!(
+            canonical_metadata_text(&entries),
+            Ok("a=first|z=last".into())
+        );
+        assert_eq!(
+            canonicalize_metadata(&[
+                MetadataEntry {
+                    key: "same".into(),
+                    value: "a".into(),
+                },
+                MetadataEntry {
+                    key: "same".into(),
+                    value: "b".into(),
+                },
+            ]),
+            Err(ValidationError::DuplicateMetadataKey)
+        );
     }
 }

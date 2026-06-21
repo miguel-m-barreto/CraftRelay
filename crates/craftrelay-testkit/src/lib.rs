@@ -10,8 +10,15 @@ pub struct SharedVectors {
     pub payload_digest: Vec<DigestVector>,
     pub fingerprint: Vec<FingerprintVector>,
     pub installation_scope: Vec<InstallationScopeVector>,
+    pub metadata_canonicalization: Vec<MetadataCanonicalizationVector>,
+    pub metadata_rejections: Vec<MetadataRejectionVector>,
+    pub envelope_input: Vec<CanonicalVector>,
     pub envelope_checksum: Vec<CanonicalVector>,
     pub revision_checksums: Vec<RevisionVector>,
+    pub projection_barrier: ProjectionBarrierVector,
+    pub consistency_token: ConsistencyTokenVector,
+    pub query_freshness: Vec<QueryFreshnessVector>,
+    pub watch_freshness: Vec<WatchFreshnessVector>,
 }
 #[derive(Debug, Deserialize)]
 pub struct UuidVector {
@@ -51,6 +58,63 @@ pub struct RevisionVector {
     pub revision: i64,
     pub canonical: String,
     pub sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MetadataCanonicalizationVector {
+    pub entries: Vec<MetadataVectorEntry>,
+    pub canonical: String,
+    pub sha256: String,
+}
+#[derive(Debug, Deserialize)]
+pub struct MetadataVectorEntry {
+    pub key: String,
+    pub value: String,
+}
+#[derive(Debug, Deserialize)]
+pub struct MetadataRejectionVector {
+    pub entries: Vec<MetadataVectorEntry>,
+    pub rejection: String,
+}
+#[derive(Debug, Deserialize)]
+pub struct ProjectionBarrierVector {
+    pub barrier_version: i32,
+    pub query_definition_version: i32,
+    pub topology_version: i64,
+    pub routing_version: i64,
+    pub canonical: String,
+    pub sha256: String,
+    pub required_next_offset: std::collections::BTreeMap<String, i64>,
+    pub exclusive: bool,
+}
+#[derive(Debug, Deserialize)]
+pub struct ConsistencyTokenVector {
+    pub token_version: i32,
+    pub installation_id: String,
+    pub authenticated_producer_id: String,
+    pub projector_id: String,
+    pub projection_name: String,
+    pub query_scope: String,
+    pub expires_at_unix_millis: i64,
+    pub canonical: String,
+    pub checksum: String,
+    pub fixture_key_utf8: String,
+    pub mac: String,
+    pub authenticated: bool,
+}
+#[derive(Debug, Deserialize)]
+pub struct QueryFreshnessVector {
+    pub mode: String,
+    pub proof: String,
+    pub current: bool,
+    pub authoritative: bool,
+    pub silent_downgrade: bool,
+}
+#[derive(Debug, Deserialize)]
+pub struct WatchFreshnessVector {
+    pub state: String,
+    pub current: bool,
+    pub reason: String,
 }
 
 pub fn load_vectors() -> SharedVectors {
@@ -97,6 +161,43 @@ mod tests {
                 scope.scoped
             );
         }
+        for metadata in &vectors.metadata_canonicalization {
+            let entries = metadata
+                .entries
+                .iter()
+                .map(|entry| craftrelay_domain::MetadataEntry {
+                    key: entry.key.clone(),
+                    value: entry.value.clone(),
+                })
+                .collect::<Vec<_>>();
+            let canonical = craftrelay_domain::canonical_metadata_text(&entries).expect("metadata");
+            assert_eq!(canonical, metadata.canonical);
+            assert_eq!(
+                hex(&craftrelay_domain::sha256(canonical.as_bytes())),
+                metadata.sha256
+            );
+        }
+        for rejection in &vectors.metadata_rejections {
+            let entries = rejection
+                .entries
+                .iter()
+                .map(|entry| craftrelay_domain::MetadataEntry {
+                    key: entry.key.clone(),
+                    value: entry.value.clone(),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                craftrelay_domain::canonicalize_metadata(&entries),
+                Err(craftrelay_domain::ValidationError::DuplicateMetadataKey)
+            );
+            assert_eq!(rejection.rejection, "DUPLICATE_METADATA_KEY");
+        }
+        for envelope in &vectors.envelope_input {
+            assert_eq!(
+                hex(&craftrelay_domain::sha256(envelope.canonical.as_bytes())),
+                envelope.sha256
+            );
+        }
         let envelope = &vectors.envelope_checksum[0];
         let actual = craftrelay_domain::sha256(envelope.canonical.as_bytes())
             .iter()
@@ -110,6 +211,50 @@ mod tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(actual, revision.sha256);
+        assert!(vectors.projection_barrier.exclusive);
+        assert_eq!(vectors.projection_barrier.barrier_version, 1);
+        assert_eq!(vectors.projection_barrier.query_definition_version, 1);
+        assert!(
+            vectors
+                .projection_barrier
+                .required_next_offset
+                .values()
+                .all(|offset| *offset >= 0)
+        );
+        assert_eq!(
+            hex(&craftrelay_domain::sha256(
+                vectors.projection_barrier.canonical.as_bytes()
+            )),
+            vectors.projection_barrier.sha256
+        );
+        assert_eq!(vectors.consistency_token.token_version, 1);
+        assert!(vectors.consistency_token.authenticated);
+        assert_eq!(
+            hex(&craftrelay_domain::sha256(
+                vectors.consistency_token.canonical.as_bytes()
+            )),
+            vectors.consistency_token.checksum
+        );
+        assert_eq!(
+            hex(&craftrelay_domain::hmac_sha256(
+                vectors.consistency_token.fixture_key_utf8.as_bytes(),
+                vectors.consistency_token.canonical.as_bytes()
+            )),
+            vectors.consistency_token.mac
+        );
+        assert!(
+            vectors
+                .query_freshness
+                .iter()
+                .all(|value| !value.silent_downgrade)
+        );
+        assert!(
+            vectors
+                .watch_freshness
+                .iter()
+                .filter(|value| value.state != "CURRENT")
+                .all(|value| !value.current)
+        );
         let protocol = include_str!("../../../proto/craftrelay/v1/contracts.proto");
         let envelope = protocol
             .split("message StoredEventEnvelope")
@@ -139,5 +284,9 @@ mod tests {
         }
         assert!(protocol.contains("required_next_offset"));
         assert!(protocol.contains("next_offset_to_resolve"));
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }

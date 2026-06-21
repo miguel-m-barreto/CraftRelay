@@ -1,5 +1,7 @@
 # Plugin adapter summary
 
+Sprint 1 multiplexes registration-bound logical producer clients over one shared transport runtime and keeps operations asynchronous. Opaque `RegisteredPluginHandle` issuance rejects string identities; it prevents accidental producer selection but is not a malicious same-JVM security boundary. Gameplay-state callbacks still return through the plugin-owned `ExecutionContext`.
+
 `PluginAdapter.md` is authoritative. One Bridge is registered before dependent plugins and reports `NOT_READY` until bounded connectivity/registration gates pass. First-party domain plugins embed typed adapters/generated clients and obtain manifest-issued handles. The Bridge owns producer instance and operation sequence, not domain logic or policy. Public API types are API/JDK-owned and do not expose gRPC, generated domain DTOs, Kafka, JDBC, or Redis.
 
 The dependency-free Sprint 0 Java skeleton models the authoritative `clientFor(Plugin)` resolution as `clientFor(RegisteredPluginHandle)`. The handle is an opaque, sealed capability issued from the actual host service-registry plugin/integration mapping; it has no string constructor and is not a producer ID selector. The future Paper binding supplies the real `Plugin` instance to that registry resolution. This prevents accidental arbitrary-string selection but, like `clientFor(Plugin)`, is not a malicious same-JVM security boundary.

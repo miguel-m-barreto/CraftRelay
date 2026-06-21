@@ -12,6 +12,9 @@ public sealed interface RegisteredPluginHandle permits BridgeIssuedPluginHandle 
 }
 
 final class BridgeIssuedPluginHandle implements RegisteredPluginHandle {
-    BridgeIssuedPluginHandle() {
+    private final Object hostPluginInstance;
+
+    BridgeIssuedPluginHandle(Object hostPluginInstance) {
+        this.hostPluginInstance = java.util.Objects.requireNonNull(hostPluginInstance);
     }
 }

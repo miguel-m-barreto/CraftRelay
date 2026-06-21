@@ -22,6 +22,9 @@ public final class SharedBridgeTransportRuntime {
     public CompletionStage<PublishLifecycleSnapshot> submit(
             String authenticatedProducerId, ClientPublishRequest immutableRequest) {
         metrics.publishSubmitted(authenticatedProducerId);
+        if (agent instanceof io.craftrelay.client.fixture.FakeAgentFixture fake) {
+            return fake.submit(authenticatedProducerId, immutableRequest);
+        }
         return agent.submit(immutableRequest);
     }
 
@@ -29,6 +32,9 @@ public final class SharedBridgeTransportRuntime {
     public CompletionStage<PublishLifecycleSnapshot> retrySameRequest(
             String authenticatedProducerId, ClientPublishRequest immutableRequest) {
         metrics.reconnectAttempt(authenticatedProducerId);
+        if (agent instanceof io.craftrelay.client.fixture.FakeAgentFixture fake) {
+            return fake.submit(authenticatedProducerId, immutableRequest);
+        }
         return agent.submit(immutableRequest);
     }
 

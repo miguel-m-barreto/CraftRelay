@@ -207,3 +207,426 @@ message BridgeProducerOwnership { string producer_instance_id = 1; int64 next_pr
 message BridgeCapacityContract { int32 total_pending_capacity = 1; int32 reserved_p0_capacity = 2; int32 per_producer_pending_limit = 3; }
 
 message LocalFirstProgressPolicy { bool immediate_local_visual_feedback = 1; bool asynchronous_delta_publish = 2; bool query_service_reconciliation = 3; bool query_per_gameplay_action = 4; }
+
+// --- Sprint 2: Producer Registration ---
+
+enum ProducerLifecycleState {
+  PRODUCER_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  PRODUCER_LIFECYCLE_STATE_ACTIVE = 1;
+  PRODUCER_LIFECYCLE_STATE_DISABLED = 2;
+  PRODUCER_LIFECYCLE_STATE_SUSPENDED = 3;
+}
+
+enum PriorityClass {
+  PRIORITY_CLASS_UNSPECIFIED = 0;
+  PRIORITY_CLASS_P0 = 1;
+  PRIORITY_CLASS_P1 = 2;
+  PRIORITY_CLASS_P2 = 3;
+  PRIORITY_CLASS_BACKGROUND = 4;
+}
+
+enum QuotaClass {
+  QUOTA_CLASS_UNSPECIFIED = 0;
+  QUOTA_CLASS_CRITICAL = 1;
+  QUOTA_CLASS_STANDARD = 2;
+  QUOTA_CLASS_BULK = 3;
+}
+
+message ProducerRegistrationRequest {
+  string installation_id = 1;
+  string integration_id = 2;
+  string paper_plugin_id = 3;
+  string proposed_producer_instance_id = 4;
+  IntegrationManifest manifest = 5;
+}
+
+message RegisteredProducer {
+  string installation_id = 1;
+  string producer_id = 2;
+  string producer_instance_id = 3;
+  string integration_id = 4;
+  string paper_plugin_id = 5;
+  ProducerLifecycleState lifecycle_state = 6;
+  repeated string allowed_namespaces = 7;
+  PriorityClass priority_class = 8;
+  QuotaClass quota_class = 9;
+  string policy_binding_id = 10;
+  int32 max_bounded_namespaces = 11;
+}
+
+message RegisteredProducerHandle {
+  string producer_id = 1;
+  string producer_instance_id = 2;
+  string installation_id = 3;
+  ProducerLifecycleState lifecycle_state = 4;
+  PriorityClass effective_priority_class = 5;
+  QuotaClass effective_quota_class = 6;
+}
+
+enum ProducerRegistrationRejectionCode {
+  PRODUCER_REGISTRATION_REJECTION_CODE_UNSPECIFIED = 0;
+  PRODUCER_REGISTRATION_REJECTION_CODE_DUPLICATE = 1;
+  PRODUCER_REGISTRATION_REJECTION_CODE_DISABLED = 2;
+  PRODUCER_REGISTRATION_REJECTION_CODE_SUSPENDED = 3;
+  PRODUCER_REGISTRATION_REJECTION_CODE_CROSS_INSTALLATION = 4;
+  PRODUCER_REGISTRATION_REJECTION_CODE_INVALID_MANIFEST = 5;
+  PRODUCER_REGISTRATION_REJECTION_CODE_NAMESPACE_DENIED = 6;
+}
+
+message ProducerRegistrationResult {
+  bool accepted = 1;
+  RegisteredProducerHandle handle = 2;
+  ProducerRegistrationRejectionCode rejection_code = 3;
+  string rejection_reason = 4;
+}
+
+// --- Sprint 2: IntegrationManifest Extended Validation ---
+
+enum DurabilityClass {
+  DURABILITY_CLASS_UNSPECIFIED = 0;
+  DURABILITY_CLASS_LOCAL_DURABLE = 1;
+  DURABILITY_CLASS_REPLICATED_DURABLE = 2;
+}
+
+enum RetentionClass {
+  RETENTION_CLASS_UNSPECIFIED = 0;
+  RETENTION_CLASS_STANDARD = 1;
+  RETENTION_CLASS_EXTENDED = 2;
+  RETENTION_CLASS_PERMANENT = 3;
+}
+
+message ManifestEventDeclaration {
+  string event_type = 1;
+  int32 min_schema_version = 2;
+  int32 max_schema_version = 3;
+  string namespace = 4;
+  EventClass event_class = 5;
+  RequestedFlushCriteria requested_flush = 6;
+  string projection_policy_id = 7;
+  DurabilityClass requested_durability = 8;
+  RetentionClass requested_retention = 9;
+  PriorityClass requested_priority = 10;
+  QuotaClass requested_quota = 11;
+}
+
+message ManifestQueryDeclaration {
+  string query_id = 1;
+  int32 min_schema_version = 2;
+  int32 max_schema_version = 3;
+}
+
+message ManifestNamespaceDeclaration {
+  string namespace = 1;
+}
+
+message ExtendedIntegrationManifest {
+  string integration_id = 1;
+  int32 integration_version = 2;
+  string paper_plugin_id = 3;
+  string producer_id = 4;
+  repeated ManifestEventDeclaration events = 5;
+  repeated ManifestQueryDeclaration queries = 6;
+  repeated ManifestNamespaceDeclaration namespaces = 7;
+  DurabilityClass required_durability = 8;
+  RetentionClass required_retention = 9;
+  PriorityClass requested_priority = 10;
+  QuotaClass requested_quota = 11;
+  int32 max_pending_publishes = 12;
+  int32 max_pending_queries = 13;
+  int32 max_active_watches = 14;
+  int32 protocol_min_version = 15;
+  int32 protocol_max_version = 16;
+}
+
+enum ManifestValidationCode {
+  MANIFEST_VALIDATION_CODE_UNSPECIFIED = 0;
+  MANIFEST_VALIDATION_CODE_VALID = 1;
+  MANIFEST_VALIDATION_CODE_DUPLICATE_EVENT = 2;
+  MANIFEST_VALIDATION_CODE_DUPLICATE_QUERY = 3;
+  MANIFEST_VALIDATION_CODE_DUPLICATE_NAMESPACE = 4;
+  MANIFEST_VALIDATION_CODE_INVALID_EVENT_NAME = 5;
+  MANIFEST_VALIDATION_CODE_INVALID_QUERY_NAME = 6;
+  MANIFEST_VALIDATION_CODE_INVALID_NAMESPACE_NAME = 7;
+  MANIFEST_VALIDATION_CODE_UNBOUNDED_LIMIT = 8;
+  MANIFEST_VALIDATION_CODE_MISSING_LIMIT = 9;
+  MANIFEST_VALIDATION_CODE_BEST_EFFORT_FORBIDDEN = 10;
+  MANIFEST_VALIDATION_CODE_SELF_PROMOTION_FORBIDDEN = 11;
+  MANIFEST_VALIDATION_CODE_INVALID_SCHEMA_VERSION = 12;
+}
+
+message ManifestValidationResult {
+  bool valid = 1;
+  repeated ManifestValidationCode violations = 2;
+  repeated string violation_details = 3;
+}
+
+// --- Sprint 2: Credentials and ACL ---
+
+enum CredentialKind {
+  CREDENTIAL_KIND_UNSPECIFIED = 0;
+  CREDENTIAL_KIND_SHARED_SECRET = 1;
+  CREDENTIAL_KIND_MTLS_CERTIFICATE = 2;
+  CREDENTIAL_KIND_IPC_TOKEN = 3;
+  CREDENTIAL_KIND_FAKE_TEST_ONLY = 4;
+}
+
+enum CredentialStatus {
+  CREDENTIAL_STATUS_UNSPECIFIED = 0;
+  CREDENTIAL_STATUS_ACTIVE = 1;
+  CREDENTIAL_STATUS_REVOKED = 2;
+  CREDENTIAL_STATUS_EXPIRED = 3;
+  CREDENTIAL_STATUS_UNKNOWN = 4;
+}
+
+message CredentialReference {
+  string credential_id = 1;
+  CredentialKind kind = 2;
+  int32 credential_revision = 3;
+  CredentialStatus status = 4;
+  string installation_id = 5;
+}
+
+enum AclAction {
+  ACL_ACTION_UNSPECIFIED = 0;
+  ACL_ACTION_PUBLISH = 1;
+  ACL_ACTION_QUERY = 2;
+  ACL_ACTION_WATCH = 3;
+  ACL_ACTION_ADMIN = 4;
+}
+
+enum AclDecision {
+  ACL_DECISION_UNSPECIFIED = 0;
+  ACL_DECISION_ALLOW = 1;
+  ACL_DECISION_DENY = 2;
+}
+
+enum AclDenyReason {
+  ACL_DENY_REASON_UNSPECIFIED = 0;
+  ACL_DENY_REASON_NO_MATCHING_RULE = 1;
+  ACL_DENY_REASON_EXPLICIT_DENY = 2;
+  ACL_DENY_REASON_CREDENTIAL_INVALID = 3;
+  ACL_DENY_REASON_CREDENTIAL_REVOKED = 4;
+  ACL_DENY_REASON_CREDENTIAL_EXPIRED = 5;
+  ACL_DENY_REASON_CROSS_INSTALLATION = 6;
+  ACL_DENY_REASON_NAMESPACE_DENIED = 7;
+}
+
+message AclPrincipal {
+  string producer_id = 1;
+  string installation_id = 2;
+  CredentialReference credential = 3;
+}
+
+message AclRule {
+  string rule_id = 1;
+  AclAction action = 2;
+  string namespace_pattern = 3;
+  AclDecision decision = 4;
+  int32 priority = 5;
+}
+
+message AclScope {
+  string installation_id = 1;
+  string namespace = 2;
+  AclAction action = 3;
+}
+
+message AclEvaluationResult {
+  AclDecision decision = 1;
+  AclDenyReason deny_reason = 2;
+  string matched_rule_id = 3;
+  int64 policy_version = 4;
+}
+
+// --- Sprint 2: Policy Resolution ---
+
+enum PolicyRejectionReason {
+  POLICY_REJECTION_REASON_UNSPECIFIED = 0;
+  POLICY_REJECTION_REASON_SELF_PROMOTION = 1;
+  POLICY_REJECTION_REASON_DURABILITY_WEAKENING = 2;
+  POLICY_REJECTION_REASON_RETENTION_WEAKENING = 3;
+  POLICY_REJECTION_REASON_PROJECTION_BYPASS = 4;
+  POLICY_REJECTION_REASON_INSTALLATION_ESCAPE = 5;
+  POLICY_REJECTION_REASON_BEST_EFFORT_FORBIDDEN = 6;
+  POLICY_REJECTION_REASON_INVALID_POLICY_BINDING = 7;
+  POLICY_REJECTION_REASON_UNKNOWN_POLICY_BINDING = 8;
+  POLICY_REJECTION_REASON_ACL_DENIED = 9;
+  POLICY_REJECTION_REASON_PRODUCER_DISABLED = 10;
+  POLICY_REJECTION_REASON_PRODUCER_SUSPENDED = 11;
+  POLICY_REJECTION_REASON_CROSS_INSTALLATION = 12;
+  POLICY_REJECTION_REASON_NOT_LOCALLY_OWNED = 13;
+  POLICY_REJECTION_REASON_QUOTA_EXCEEDED = 14;
+}
+
+enum AdmissionDecision {
+  ADMISSION_DECISION_UNSPECIFIED = 0;
+  ADMISSION_DECISION_ADMITTED = 1;
+  ADMISSION_DECISION_REJECTED = 2;
+}
+
+message PolicyResolutionRequest {
+  string installation_id = 1;
+  RegisteredProducerHandle producer = 2;
+  ExtendedIntegrationManifest manifest = 3;
+  AclEvaluationResult acl_result = 4;
+  string ownership_snapshot_id = 5;
+  string namespace = 6;
+  DurabilityClass requested_durability = 7;
+  RetentionClass requested_retention = 8;
+  string requested_projection_policy_id = 9;
+  RequestedFlushCriteria requested_flush = 10;
+  PriorityClass requested_priority = 11;
+  QuotaClass requested_quota = 12;
+}
+
+message EffectivePolicyResult {
+  string effective_producer_id = 1;
+  string effective_namespace = 2;
+  DurabilityClass effective_durability = 3;
+  RetentionClass effective_retention = 4;
+  string effective_projection_policy_id = 5;
+  int32 effective_projection_policy_version = 6;
+  QuotaClass effective_quota_class = 7;
+  PriorityClass effective_priority_class = 8;
+  EffectiveFlushCriteria effective_flush = 9;
+  int64 policy_version = 10;
+  string ownership_snapshot_id = 11;
+  AdmissionDecision admission_decision = 12;
+  PolicyRejectionReason rejection_reason = 13;
+  string decision_detail = 14;
+}
+
+// --- Sprint 2: Ownership Snapshot ---
+
+enum OwnershipMode {
+  OWNERSHIP_MODE_UNSPECIFIED = 0;
+  OWNERSHIP_MODE_NODE_LOCAL = 1;
+}
+
+message OwnershipSnapshotId {
+  string snapshot_id = 1;
+  int64 snapshot_version = 2;
+}
+
+message NamespaceOwnershipEntry {
+  string namespace = 1;
+  string owner_node_id = 2;
+  string owner_agent_id = 3;
+  string installation_id = 4;
+  OwnershipMode mode = 5;
+}
+
+message OwnershipSnapshot {
+  OwnershipSnapshotId id = 1;
+  string installation_id = 2;
+  string node_id = 3;
+  OwnershipMode mode = 4;
+  repeated NamespaceOwnershipEntry entries = 5;
+  bytes snapshot_checksum = 6;
+}
+
+enum OwnershipValidationCode {
+  OWNERSHIP_VALIDATION_CODE_UNSPECIFIED = 0;
+  OWNERSHIP_VALIDATION_CODE_VALID = 1;
+  OWNERSHIP_VALIDATION_CODE_MISSING_OWNER = 2;
+  OWNERSHIP_VALIDATION_CODE_DUPLICATE_NAMESPACE = 3;
+  OWNERSHIP_VALIDATION_CODE_CROSS_INSTALLATION = 4;
+  OWNERSHIP_VALIDATION_CODE_UNSUPPORTED_MODE = 5;
+  OWNERSHIP_VALIDATION_CODE_DYNAMIC_ELECTION_FORBIDDEN = 6;
+  OWNERSHIP_VALIDATION_CODE_AMBIGUOUS_OWNERSHIP = 7;
+  OWNERSHIP_VALIDATION_CODE_NOT_LOCALLY_OWNED = 8;
+}
+
+message OwnershipValidationResult {
+  bool valid = 1;
+  repeated OwnershipValidationCode violations = 2;
+  repeated string violation_details = 3;
+}
+
+// --- Sprint 2: Quotas and Bounded Ingress ---
+
+message ProducerQuotaState {
+  string producer_id = 1;
+  int32 in_flight_publishes = 2;
+  int32 max_in_flight_publishes = 3;
+  int32 queued_publishes = 4;
+  int32 max_queued_publishes = 5;
+  int64 in_flight_bytes = 6;
+  int64 max_in_flight_bytes = 7;
+}
+
+message NamespaceQuotaState {
+  string namespace = 1;
+  int32 in_flight_publishes = 2;
+  int32 max_in_flight_publishes = 3;
+}
+
+message GlobalQuotaState {
+  int32 in_flight_publishes = 1;
+  int32 max_in_flight_publishes = 2;
+  int32 reserved_p0_capacity = 3;
+  int32 used_p0_capacity = 4;
+}
+
+enum AdmissionRejectionReason {
+  ADMISSION_REJECTION_REASON_UNSPECIFIED = 0;
+  ADMISSION_REJECTION_REASON_PRODUCER_IN_FLIGHT_EXCEEDED = 1;
+  ADMISSION_REJECTION_REASON_PRODUCER_QUEUE_EXCEEDED = 2;
+  ADMISSION_REJECTION_REASON_PRODUCER_BYTES_EXCEEDED = 3;
+  ADMISSION_REJECTION_REASON_NAMESPACE_IN_FLIGHT_EXCEEDED = 4;
+  ADMISSION_REJECTION_REASON_GLOBAL_IN_FLIGHT_EXCEEDED = 5;
+  ADMISSION_REJECTION_REASON_P0_CAPACITY_RESERVED = 6;
+  ADMISSION_REJECTION_REASON_PRODUCER_DISABLED = 7;
+  ADMISSION_REJECTION_REASON_PRODUCER_UNAUTHORIZED = 8;
+  ADMISSION_REJECTION_REASON_NOT_LOCALLY_OWNED = 9;
+}
+
+message AdmissionResult {
+  AdmissionDecision decision = 1;
+  AdmissionRejectionReason rejection_reason = 2;
+  string rejection_detail = 3;
+}
+
+// --- Sprint 2: Profile Validation Skeletons ---
+
+message KafkaDurabilityProfile {
+  string profile_id = 1;
+  int32 replication_factor = 2;
+  int32 min_insync_replicas = 3;
+  string required_acks = 4;
+  string topic_reference = 5;
+  int32 profile_version = 6;
+}
+
+message RetentionProfile {
+  string profile_id = 1;
+  RetentionClass retention_class = 2;
+  int64 retention_horizon_millis = 3;
+  int32 profile_version = 4;
+}
+
+message ProjectionPolicyProfile {
+  string policy_id = 1;
+  int32 policy_version = 2;
+  repeated string required_projector_ids = 3;
+  bool archive_required = 4;
+}
+
+message QuotaProfile {
+  string profile_id = 1;
+  QuotaClass quota_class = 2;
+  int32 max_in_flight_publishes = 3;
+  int32 max_queued_publishes = 4;
+  int64 max_in_flight_bytes = 5;
+  int32 profile_version = 6;
+}
+
+enum ProfileValidationCode {
+  PROFILE_VALIDATION_CODE_UNSPECIFIED = 0;
+  PROFILE_VALIDATION_CODE_VALID = 1;
+  PROFILE_VALIDATION_CODE_UNKNOWN_PROFILE = 2;
+  PROFILE_VALIDATION_CODE_INVALID_RF = 3;
+  PROFILE_VALIDATION_CODE_INVALID_MIN_ISR = 4;
+  PROFILE_VALIDATION_CODE_INVALID_ACKS = 5;
+  PROFILE_VALIDATION_CODE_WEAKENED_DURABILITY = 6;
+}

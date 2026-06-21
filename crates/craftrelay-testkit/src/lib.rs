@@ -19,6 +19,12 @@ pub struct SharedVectors {
     pub consistency_token: ConsistencyTokenVector,
     pub query_freshness: Vec<QueryFreshnessVector>,
     pub watch_freshness: Vec<WatchFreshnessVector>,
+    pub sprint2_producer_registration: Vec<ProducerRegistrationVector>,
+    pub sprint2_acl: Vec<AclVector>,
+    pub sprint2_policy_resolution: Vec<PolicyResolutionVector>,
+    pub sprint2_ownership: Vec<OwnershipVector>,
+    pub sprint2_quota_admission: Vec<QuotaAdmissionVector>,
+    pub sprint2_kafka_profile: Vec<KafkaProfileVector>,
 }
 #[derive(Debug, Deserialize)]
 pub struct UuidVector {
@@ -115,6 +121,100 @@ pub struct WatchFreshnessVector {
     pub state: String,
     pub current: bool,
     pub reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProducerRegistrationVector {
+    pub producer_id: String,
+    pub installation_id: String,
+    pub lifecycle: String,
+    pub valid: bool,
+    #[serde(default)]
+    pub rejection: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AclRuleVector {
+    pub rule_id: String,
+    pub action: String,
+    pub pattern: String,
+    pub decision: String,
+    pub priority: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AclVector {
+    pub principal_installation: String,
+    pub scope_installation: String,
+    pub credential_status: String,
+    pub namespace: String,
+    pub action: String,
+    pub rules: Vec<AclRuleVector>,
+    pub expected_decision: String,
+    #[serde(default)]
+    pub expected_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PolicyResolutionVector {
+    pub description: String,
+    pub installation_id: String,
+    pub producer_lifecycle: String,
+    pub acl_decision: String,
+    pub namespace: String,
+    pub owned_namespaces: Vec<String>,
+    pub requested_durability: String,
+    pub minimum_durability: String,
+    pub expected_admission: String,
+    #[serde(default)]
+    pub expected_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OwnershipEntryVector {
+    pub namespace: String,
+    pub owner_node: String,
+    pub installation: String,
+    pub mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OwnershipVector {
+    pub description: String,
+    pub mode: String,
+    pub entries: Vec<OwnershipEntryVector>,
+    pub installation_id: String,
+    pub node_id: String,
+    pub valid: bool,
+    #[serde(default)]
+    pub violation: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QuotaAdmissionVector {
+    pub description: String,
+    pub producer_priority: String,
+    pub in_flight: i32,
+    pub max_in_flight: i32,
+    pub global_in_flight: i32,
+    pub global_max: i32,
+    pub reserved_p0: i32,
+    pub used_p0: i32,
+    pub namespace_owned: bool,
+    pub expected: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct KafkaProfileVector {
+    pub description: String,
+    pub rf: i32,
+    pub min_isr: i32,
+    pub acks: String,
+    pub valid_p0: bool,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 pub fn load_vectors() -> SharedVectors {
@@ -284,6 +384,215 @@ mod tests {
         }
         assert!(protocol.contains("required_next_offset"));
         assert!(protocol.contains("next_offset_to_resolve"));
+
+        // Sprint 2 vector assertions
+        for reg in &vectors.sprint2_producer_registration {
+            let lifecycle = match reg.lifecycle.as_str() {
+                "ACTIVE" => craftrelay_domain::ProducerLifecycleState::Active,
+                "DISABLED" => craftrelay_domain::ProducerLifecycleState::Disabled,
+                "SUSPENDED" => craftrelay_domain::ProducerLifecycleState::Suspended,
+                other => panic!("unknown lifecycle: {other}"),
+            };
+            let producer = craftrelay_domain::RegisteredProducer {
+                installation_id: reg.installation_id.clone(),
+                producer_id: reg.producer_id.clone(),
+                producer_instance_id: "instance-1".into(),
+                integration_id: "reference".into(),
+                paper_plugin_id: "ReferencePlugin".into(),
+                lifecycle_state: lifecycle,
+                allowed_namespaces: vec!["economy".into()],
+                priority_class: craftrelay_domain::PriorityClass::P1,
+                quota_class: craftrelay_domain::QuotaClass::Standard,
+                policy_binding_id: "binding-1".into(),
+            };
+            let result =
+                craftrelay_domain::validate_producer_registration(&producer, "installation-a", &[]);
+            assert_eq!(
+                result.is_ok(),
+                reg.valid,
+                "producer registration vector: {}",
+                reg.producer_id
+            );
+        }
+
+        for acl in &vectors.sprint2_acl {
+            let cred_status = match acl.credential_status.as_str() {
+                "ACTIVE" => craftrelay_domain::CredentialStatus::Active,
+                "REVOKED" => craftrelay_domain::CredentialStatus::Revoked,
+                "EXPIRED" => craftrelay_domain::CredentialStatus::Expired,
+                "UNKNOWN" => craftrelay_domain::CredentialStatus::Unknown,
+                other => panic!("unknown credential status: {other}"),
+            };
+            let principal = craftrelay_domain::AclPrincipal {
+                producer_id: "producer-a".into(),
+                installation_id: acl.principal_installation.clone(),
+                credential: craftrelay_domain::CredentialReference {
+                    credential_id: "cred-1".into(),
+                    kind: craftrelay_domain::CredentialKind::FakeTestOnly,
+                    revision: 1,
+                    status: cred_status,
+                    installation_id: acl.principal_installation.clone(),
+                },
+            };
+            let rules: Vec<craftrelay_domain::AclRule> = acl
+                .rules
+                .iter()
+                .map(|r| craftrelay_domain::AclRule {
+                    rule_id: r.rule_id.clone(),
+                    action: match r.action.as_str() {
+                        "PUBLISH" => craftrelay_domain::AclAction::Publish,
+                        "QUERY" => craftrelay_domain::AclAction::Query,
+                        other => panic!("unknown action: {other}"),
+                    },
+                    namespace_pattern: r.pattern.clone(),
+                    decision: match r.decision.as_str() {
+                        "ALLOW" => craftrelay_domain::AclDecision::Allow,
+                        "DENY" => craftrelay_domain::AclDecision::Deny,
+                        other => panic!("unknown decision: {other}"),
+                    },
+                    priority: r.priority,
+                })
+                .collect();
+            let result = craftrelay_domain::evaluate_acl(
+                &principal,
+                &acl.scope_installation,
+                &acl.namespace,
+                craftrelay_domain::AclAction::Publish,
+                &rules,
+                1,
+            );
+            let expected = match acl.expected_decision.as_str() {
+                "ALLOW" => craftrelay_domain::AclDecision::Allow,
+                "DENY" => craftrelay_domain::AclDecision::Deny,
+                other => panic!("unknown expected decision: {other}"),
+            };
+            assert_eq!(
+                result.decision, expected,
+                "ACL vector: ns={}",
+                acl.namespace
+            );
+        }
+
+        for ownership in &vectors.sprint2_ownership {
+            let entries: Vec<craftrelay_domain::NamespaceOwnershipEntry> = ownership
+                .entries
+                .iter()
+                .map(|e| craftrelay_domain::NamespaceOwnershipEntry {
+                    namespace: e.namespace.clone(),
+                    owner_node_id: e.owner_node.clone(),
+                    owner_agent_id: if e.owner_node.is_empty() {
+                        "".into()
+                    } else {
+                        "agent-1".into()
+                    },
+                    installation_id: e.installation.clone(),
+                    mode: craftrelay_domain::OwnershipMode::NodeLocal,
+                })
+                .collect();
+            let snapshot = craftrelay_domain::OwnershipSnapshot {
+                id: craftrelay_domain::OwnershipSnapshotId {
+                    snapshot_id: "snap-1".into(),
+                    snapshot_version: 1,
+                },
+                installation_id: ownership.installation_id.clone(),
+                node_id: ownership.node_id.clone(),
+                mode: craftrelay_domain::OwnershipMode::NodeLocal,
+                entries,
+            };
+            let result = craftrelay_domain::validate_ownership_snapshot(&snapshot);
+            assert_eq!(
+                result.is_ok(),
+                ownership.valid,
+                "ownership vector: {}",
+                ownership.description
+            );
+        }
+
+        for quota in &vectors.sprint2_quota_admission {
+            let priority = match quota.producer_priority.as_str() {
+                "P0" => craftrelay_domain::PriorityClass::P0,
+                "P1" => craftrelay_domain::PriorityClass::P1,
+                "P2" => craftrelay_domain::PriorityClass::P2,
+                "BACKGROUND" => craftrelay_domain::PriorityClass::Background,
+                other => panic!("unknown priority: {other}"),
+            };
+            let producer = craftrelay_domain::RegisteredProducer {
+                installation_id: "installation-a".into(),
+                producer_id: "producer-a".into(),
+                producer_instance_id: "instance-1".into(),
+                integration_id: "reference".into(),
+                paper_plugin_id: "ReferencePlugin".into(),
+                lifecycle_state: craftrelay_domain::ProducerLifecycleState::Active,
+                allowed_namespaces: vec!["economy".into()],
+                priority_class: priority,
+                quota_class: craftrelay_domain::QuotaClass::Standard,
+                policy_binding_id: "binding-1".into(),
+            };
+            let pq = craftrelay_domain::ProducerQuotaState {
+                producer_id: "producer-a".into(),
+                in_flight_publishes: quota.in_flight,
+                max_in_flight_publishes: quota.max_in_flight,
+                queued_publishes: 0,
+                max_queued_publishes: 50,
+                in_flight_bytes: 0,
+                max_in_flight_bytes: 100_000,
+            };
+            let nq = craftrelay_domain::NamespaceQuotaState {
+                namespace: "economy".into(),
+                in_flight_publishes: 10,
+                max_in_flight_publishes: 200,
+            };
+            let gq = craftrelay_domain::GlobalQuotaState {
+                in_flight_publishes: quota.global_in_flight,
+                max_in_flight_publishes: quota.global_max,
+                reserved_p0_capacity: quota.reserved_p0,
+                used_p0_capacity: quota.used_p0,
+            };
+            let result = craftrelay_domain::evaluate_admission(
+                &producer,
+                &pq,
+                &nq,
+                &gq,
+                100,
+                quota.namespace_owned,
+            );
+            let expected = match quota.expected.as_str() {
+                "ADMITTED" => craftrelay_domain::AdmissionDecision::Admitted,
+                "REJECTED" => craftrelay_domain::AdmissionDecision::Rejected,
+                other => panic!("unknown expected: {other}"),
+            };
+            assert_eq!(
+                result.decision, expected,
+                "quota vector: {}",
+                quota.description
+            );
+        }
+
+        for profile in &vectors.sprint2_kafka_profile {
+            let p = craftrelay_domain::KafkaDurabilityProfile {
+                profile_id: "test".into(),
+                replication_factor: profile.rf,
+                min_insync_replicas: profile.min_isr,
+                required_acks: profile.acks.clone(),
+                topic_reference: "events".into(),
+                profile_version: 1,
+            };
+            let result = craftrelay_domain::validate_p0_kafka_profile(&p);
+            assert_eq!(
+                result.is_ok(),
+                profile.valid_p0,
+                "kafka profile vector: {}",
+                profile.description
+            );
+        }
+
+        assert!(protocol.contains("ProducerLifecycleState"));
+        assert!(protocol.contains("CredentialReference"));
+        assert!(protocol.contains("AclEvaluationResult"));
+        assert!(protocol.contains("EffectivePolicyResult"));
+        assert!(protocol.contains("OwnershipSnapshot"));
+        assert!(protocol.contains("AdmissionResult"));
+        assert!(protocol.contains("KafkaDurabilityProfile"));
     }
 
     fn hex(bytes: &[u8]) -> String {

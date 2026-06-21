@@ -22,5 +22,46 @@
   "query_freshness": [{"mode":"STRICT_LATEST_COMMITTED","proof":"UNAVAILABLE","current":false,"authoritative":false,"silent_downgrade":false},{"mode":"ALLOW_STALE","proof":"STALE_ACCEPTED","current":false,"authoritative":false,"silent_downgrade":false}],
   "watch_freshness": [{"state":"DETACHED","current":false,"reason":"capacity"},{"state":"INCOMPARABLE","current":false,"reason":"topology_changed"}],
   "live_result_metadata": {"source":"KAFKA_DERIVED_REDIS","authoritative":false,"live_checkpoint_separate":true,"fallback":"PROJECTED_OR_EXPLICIT_UNAVAILABLE"},
-  "display_classification": [{"mode":"PROJECTED_PLUS_LIVE","display_only":true,"satisfies_strict":false},{"mode":"LIVE_ONLY","display_only":true,"satisfies_strict":false}]
+  "display_classification": [{"mode":"PROJECTED_PLUS_LIVE","display_only":true,"satisfies_strict":false},{"mode":"LIVE_ONLY","display_only":true,"satisfies_strict":false}],
+
+  "sprint2_producer_registration": [
+    {"producer_id":"producer-a","installation_id":"installation-a","lifecycle":"ACTIVE","valid":true},
+    {"producer_id":"producer-a","installation_id":"installation-b","lifecycle":"ACTIVE","valid":false,"rejection":"CROSS_INSTALLATION"},
+    {"producer_id":"producer-a","installation_id":"installation-a","lifecycle":"DISABLED","valid":false,"rejection":"DISABLED"},
+    {"producer_id":"producer-a","installation_id":"installation-a","lifecycle":"SUSPENDED","valid":false,"rejection":"SUSPENDED"}
+  ],
+  "sprint2_acl": [
+    {"principal_installation":"installation-a","scope_installation":"installation-a","credential_status":"ACTIVE","namespace":"economy","action":"PUBLISH","rules":[{"rule_id":"allow-economy","action":"PUBLISH","pattern":"economy","decision":"ALLOW","priority":10}],"expected_decision":"ALLOW"},
+    {"principal_installation":"installation-a","scope_installation":"installation-a","credential_status":"ACTIVE","namespace":"economy","action":"PUBLISH","rules":[{"rule_id":"deny-economy","action":"PUBLISH","pattern":"economy","decision":"DENY","priority":20},{"rule_id":"allow-economy","action":"PUBLISH","pattern":"economy","decision":"ALLOW","priority":10}],"expected_decision":"DENY"},
+    {"principal_installation":"installation-a","scope_installation":"installation-b","credential_status":"ACTIVE","namespace":"economy","action":"PUBLISH","rules":[],"expected_decision":"DENY","expected_reason":"CROSS_INSTALLATION"},
+    {"principal_installation":"installation-a","scope_installation":"installation-a","credential_status":"REVOKED","namespace":"economy","action":"PUBLISH","rules":[{"rule_id":"allow-all","action":"PUBLISH","pattern":"*","decision":"ALLOW","priority":1}],"expected_decision":"DENY","expected_reason":"CREDENTIAL_REVOKED"},
+    {"principal_installation":"installation-a","scope_installation":"installation-a","credential_status":"EXPIRED","namespace":"economy","action":"PUBLISH","rules":[],"expected_decision":"DENY","expected_reason":"CREDENTIAL_EXPIRED"},
+    {"principal_installation":"installation-a","scope_installation":"installation-a","credential_status":"UNKNOWN","namespace":"economy","action":"PUBLISH","rules":[],"expected_decision":"DENY","expected_reason":"CREDENTIAL_INVALID"},
+    {"principal_installation":"installation-a","scope_installation":"installation-a","credential_status":"ACTIVE","namespace":"mining","action":"PUBLISH","rules":[{"rule_id":"allow-economy","action":"PUBLISH","pattern":"economy","decision":"ALLOW","priority":10}],"expected_decision":"DENY","expected_reason":"NO_MATCHING_RULE"}
+  ],
+  "sprint2_policy_resolution": [
+    {"description":"valid policy resolution","installation_id":"installation-a","producer_lifecycle":"ACTIVE","acl_decision":"ALLOW","namespace":"economy","owned_namespaces":["economy"],"requested_durability":"REPLICATED_DURABLE","minimum_durability":"REPLICATED_DURABLE","expected_admission":"ADMITTED"},
+    {"description":"durability weakening rejected","installation_id":"installation-a","producer_lifecycle":"ACTIVE","acl_decision":"ALLOW","namespace":"economy","owned_namespaces":["economy"],"requested_durability":"LOCAL_DURABLE","minimum_durability":"REPLICATED_DURABLE","expected_admission":"REJECTED","expected_reason":"DURABILITY_WEAKENING"},
+    {"description":"not locally owned rejected","installation_id":"installation-a","producer_lifecycle":"ACTIVE","acl_decision":"ALLOW","namespace":"economy","owned_namespaces":["mining"],"requested_durability":"REPLICATED_DURABLE","minimum_durability":"REPLICATED_DURABLE","expected_admission":"REJECTED","expected_reason":"NOT_LOCALLY_OWNED"},
+    {"description":"disabled producer rejected","installation_id":"installation-a","producer_lifecycle":"DISABLED","acl_decision":"ALLOW","namespace":"economy","owned_namespaces":["economy"],"requested_durability":"REPLICATED_DURABLE","minimum_durability":"REPLICATED_DURABLE","expected_admission":"REJECTED","expected_reason":"PRODUCER_DISABLED"},
+    {"description":"ACL denied rejected","installation_id":"installation-a","producer_lifecycle":"ACTIVE","acl_decision":"DENY","namespace":"economy","owned_namespaces":["economy"],"requested_durability":"REPLICATED_DURABLE","minimum_durability":"REPLICATED_DURABLE","expected_admission":"REJECTED","expected_reason":"ACL_DENIED"}
+  ],
+  "sprint2_ownership": [
+    {"description":"valid NODE_LOCAL snapshot","mode":"NODE_LOCAL","entries":[{"namespace":"economy","owner_node":"node-1","installation":"installation-a","mode":"NODE_LOCAL"}],"installation_id":"installation-a","node_id":"node-1","valid":true},
+    {"description":"duplicate namespace rejected","mode":"NODE_LOCAL","entries":[{"namespace":"economy","owner_node":"node-1","installation":"installation-a","mode":"NODE_LOCAL"},{"namespace":"economy","owner_node":"node-1","installation":"installation-a","mode":"NODE_LOCAL"}],"installation_id":"installation-a","node_id":"node-1","valid":false,"violation":"DUPLICATE_NAMESPACE"},
+    {"description":"cross-installation rejected","mode":"NODE_LOCAL","entries":[{"namespace":"economy","owner_node":"node-1","installation":"installation-b","mode":"NODE_LOCAL"}],"installation_id":"installation-a","node_id":"node-1","valid":false,"violation":"CROSS_INSTALLATION"},
+    {"description":"missing owner rejected","mode":"NODE_LOCAL","entries":[{"namespace":"economy","owner_node":"","installation":"installation-a","mode":"NODE_LOCAL"}],"installation_id":"installation-a","node_id":"node-1","valid":false,"violation":"MISSING_OWNER"}
+  ],
+  "sprint2_quota_admission": [
+    {"description":"under limit admitted","producer_priority":"P1","in_flight":5,"max_in_flight":100,"global_in_flight":20,"global_max":500,"reserved_p0":50,"used_p0":10,"namespace_owned":true,"expected":"ADMITTED"},
+    {"description":"producer in-flight exceeded","producer_priority":"P1","in_flight":100,"max_in_flight":100,"global_in_flight":20,"global_max":500,"reserved_p0":50,"used_p0":10,"namespace_owned":true,"expected":"REJECTED","reason":"PRODUCER_IN_FLIGHT_EXCEEDED"},
+    {"description":"P0 capacity reserved blocks lower priority","producer_priority":"P2","in_flight":5,"max_in_flight":100,"global_in_flight":460,"global_max":500,"reserved_p0":50,"used_p0":10,"namespace_owned":true,"expected":"REJECTED","reason":"P0_CAPACITY_RESERVED"},
+    {"description":"P0 producer uses reserved capacity","producer_priority":"P0","in_flight":5,"max_in_flight":100,"global_in_flight":460,"global_max":500,"reserved_p0":50,"used_p0":10,"namespace_owned":true,"expected":"ADMITTED"},
+    {"description":"not locally owned rejected","producer_priority":"P1","in_flight":5,"max_in_flight":100,"global_in_flight":20,"global_max":500,"reserved_p0":50,"used_p0":10,"namespace_owned":false,"expected":"REJECTED","reason":"NOT_LOCALLY_OWNED"}
+  ],
+  "sprint2_kafka_profile": [
+    {"description":"valid P0 profile","rf":5,"min_isr":5,"acks":"all","valid_p0":true},
+    {"description":"weakened RF rejected","rf":3,"min_isr":3,"acks":"all","valid_p0":false,"error":"WEAKENED_DURABILITY"},
+    {"description":"invalid acks rejected","rf":5,"min_isr":5,"acks":"1","valid_p0":false,"error":"INVALID_ACKS"}
+  ]
 }

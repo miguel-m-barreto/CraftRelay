@@ -8,7 +8,7 @@ Checked 2026-06-20. Versions are intentionally pinned; selection is not a claim 
 | Rust audit tooling image | `craftrelay/rust-audit:1.88.0-bookworm` (local), base `rust:1.88.0-bookworm` | https://hub.docker.com/_/rust | Explicit Docker audit mode only. Adds `cmake`, `g++`, `make`, and `pkg-config` to compile `rdkafka-sys`/vendored `librdkafka` for the compile-tested BarrierCaptureAdapter spike. |
 | Tokio | 1.45.1 | https://github.com/tokio-rs/tokio/releases/tag/tokio-1.45.1 | Future runtime source; not needed in Sprint 0. |
 | tonic / prost | 0.13.1 / 0.13.5 | https://github.com/hyperium/tonic/releases/tag/v0.13.1 | Future generated transport; not needed in Sprint 0. |
-| SQLite / rusqlite | 3.49.2 / 0.35.0 | https://sqlite.org/releaselog/3_49_2.html | Backend remains PROPOSED; no dependency added. |
+| SQLite / rusqlite | 3.49.2 / 0.35.0 | https://sqlite.org/releaselog/3_49_2.html | Sprint 3 benchmark spike only; `bundled` feature compiles SQLite from source. Production journal backend remains EXPERIMENTAL pending Sprint 4 decision. |
 | rdkafka / librdkafka | 0.38.0 / 2.12.1 | https://github.com/fede1024/rust-rdkafka/releases/tag/v0.38.0 | Only compile-tested read-committed barrier spike; no publisher. |
 | curl headers (librdkafka build input) | 8.14.1 | https://curl.se/changes.html#8_14_1 | Exact CI source archive; curl runtime behavior is not used. |
 | Apache Kafka | 3.9.1 | https://kafka.apache.org/downloads | KRaft Compose profile, RF=5/minISR=5 contract. |

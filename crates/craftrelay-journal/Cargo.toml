@@ -1,0 +1,11 @@
+[package]
+name = "craftrelay-journal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+craftrelay-domain = { path = "../craftrelay-domain" }
+rusqlite = { version = "=0.35.0", features = ["bundled"] }
+sha2 = { workspace = true }

@@ -5,6 +5,7 @@ members = [
   "crates/craftrelay-agent",
   "crates/craftrelay-testkit",
   "crates/craftrelay-journal-bench",
+  "crates/craftrelay-journal",
 ]
 resolver = "2"
 

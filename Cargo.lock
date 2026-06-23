@@ -67,6 +67,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "craftrelay-journal"
+version = "0.1.0"
+dependencies = [
+ "craftrelay-domain",
+ "rusqlite",
+ "sha2",
+]
+
+[[package]]
 name = "craftrelay-journal-bench"
 version = "0.1.0"
 dependencies = [

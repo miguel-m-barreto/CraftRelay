@@ -2,6 +2,5 @@
 
 pub mod barrier_capture;
 
-/// Local durable journal is available via the `craftrelay-journal` crate.
-/// Kafka publisher, ACK consumer, and replicated durability remain out of scope.
 pub const LOCAL_JOURNAL_AVAILABLE: bool = true;
+pub const KAFKA_DELIVERY_AVAILABLE: bool = true;

@@ -13,9 +13,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4.2.2
       - name: Select pinned Java
-        run: |
-          sudo update-java-alternatives --set java-1.21.0-openjdk-amd64
-          java -version
+        uses: actions/setup-java@v4.7.1
+        with:
+          distribution: temurin
+          java-version: '25'
       - name: Select pinned Rust
         run: |
           rustup toolchain install 1.88.0 --profile minimal --component rustfmt,clippy

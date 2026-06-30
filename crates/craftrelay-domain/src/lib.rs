@@ -124,6 +124,7 @@ pub enum PayloadRetentionStatus {
 pub enum DeliveryStatus {
     LocalAccepted,
     DeliveryPending,
+    DeliveryRetrying,
     Replicated,
     DeliveryBlocked,
 }
@@ -1068,6 +1069,121 @@ pub fn validate_p0_kafka_profile(
     }
     if profile.min_insync_replicas < 5 {
         return Err(ProfileValidationError::WeakenedDurability);
+    }
+    Ok(())
+}
+
+// --- Sprint 5: Extended Kafka Production Profile ---
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KafkaProductionProfile {
+    pub profile_id: String,
+    pub profile_version: i32,
+    pub replication_factor: i32,
+    pub min_insync_replicas: i32,
+    pub required_acks: String,
+    pub enable_idempotence: bool,
+    pub delivery_timeout_ms: i64,
+    pub request_timeout_ms: i64,
+    pub linger_ms: i64,
+    pub max_in_flight_requests_per_connection: i32,
+    pub compression: String,
+    pub retention_ms: i64,
+    pub retention_bytes: i64,
+    pub cleanup_policy: String,
+    pub unclean_leader_election: bool,
+    pub topic_deletion_policy: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtendedProfileValidationError {
+    Base(ProfileValidationError),
+    IdempotenceRequired,
+    InvalidCleanupPolicy,
+    UncleanElectionForbidden,
+    InvalidDeliveryTimeout,
+    InvalidRequestTimeout,
+    InvalidLingerMs,
+    InvalidMaxInFlight,
+    InvalidCompression,
+    InvalidRetentionMs,
+    InvalidRetentionBytes,
+    TopicDeletionForbidden,
+}
+
+fn validate_production_base(
+    profile: &KafkaProductionProfile,
+) -> Result<(), ExtendedProfileValidationError> {
+    let base = KafkaDurabilityProfile {
+        profile_id: profile.profile_id.clone(),
+        replication_factor: profile.replication_factor,
+        min_insync_replicas: profile.min_insync_replicas,
+        required_acks: profile.required_acks.clone(),
+        topic_reference: String::new(),
+        profile_version: profile.profile_version,
+    };
+    validate_kafka_profile(&base).map_err(ExtendedProfileValidationError::Base)?;
+    if !profile.enable_idempotence {
+        return Err(ExtendedProfileValidationError::IdempotenceRequired);
+    }
+    if profile.delivery_timeout_ms <= 0 {
+        return Err(ExtendedProfileValidationError::InvalidDeliveryTimeout);
+    }
+    if profile.request_timeout_ms <= 0 {
+        return Err(ExtendedProfileValidationError::InvalidRequestTimeout);
+    }
+    if profile.linger_ms < 0 {
+        return Err(ExtendedProfileValidationError::InvalidLingerMs);
+    }
+    if !(1..=5).contains(&profile.max_in_flight_requests_per_connection) {
+        return Err(ExtendedProfileValidationError::InvalidMaxInFlight);
+    }
+    if !matches!(
+        profile.compression.as_str(),
+        "none" | "gzip" | "snappy" | "lz4" | "zstd"
+    ) {
+        return Err(ExtendedProfileValidationError::InvalidCompression);
+    }
+    if profile.retention_ms <= 0 {
+        return Err(ExtendedProfileValidationError::InvalidRetentionMs);
+    }
+    if profile.retention_bytes <= 0 {
+        return Err(ExtendedProfileValidationError::InvalidRetentionBytes);
+    }
+    if !matches!(
+        profile.cleanup_policy.as_str(),
+        "delete" | "compact" | "delete,compact"
+    ) {
+        return Err(ExtendedProfileValidationError::InvalidCleanupPolicy);
+    }
+    if profile.unclean_leader_election {
+        return Err(ExtendedProfileValidationError::UncleanElectionForbidden);
+    }
+    if profile.topic_deletion_policy != "PROTECTED" {
+        return Err(ExtendedProfileValidationError::TopicDeletionForbidden);
+    }
+    Ok(())
+}
+
+pub fn validate_production_profile(
+    profile: &KafkaProductionProfile,
+) -> Result<(), ExtendedProfileValidationError> {
+    validate_production_base(profile)
+}
+
+pub fn validate_p0_production_profile(
+    profile: &KafkaProductionProfile,
+) -> Result<(), ExtendedProfileValidationError> {
+    validate_production_base(profile)?;
+    if profile.replication_factor < 5 {
+        return Err(ExtendedProfileValidationError::Base(
+            ProfileValidationError::WeakenedDurability,
+        ));
+    }
+    if profile.min_insync_replicas < 5 {
+        return Err(ExtendedProfileValidationError::Base(
+            ProfileValidationError::WeakenedDurability,
+        ));
     }
     Ok(())
 }
@@ -2331,5 +2447,113 @@ mod tests {
         assert!(!namespace_matches("economy", "mining"));
         assert!(namespace_matches("economy.*", "economy.transfer"));
         assert!(!namespace_matches("economy.*", "economy"));
+    }
+
+    // --- Sprint 5: Extended Production Profile Tests ---
+
+    fn valid_production_profile() -> KafkaProductionProfile {
+        KafkaProductionProfile {
+            profile_id: "p0-production".into(),
+            profile_version: 1,
+            replication_factor: 5,
+            min_insync_replicas: 5,
+            required_acks: "all".into(),
+            enable_idempotence: true,
+            delivery_timeout_ms: 120_000,
+            request_timeout_ms: 30_000,
+            linger_ms: 5,
+            max_in_flight_requests_per_connection: 5,
+            compression: "lz4".into(),
+            retention_ms: 604_800_000,
+            retention_bytes: 1_073_741_824,
+            cleanup_policy: "delete".into(),
+            unclean_leader_election: false,
+            topic_deletion_policy: "PROTECTED".into(),
+        }
+    }
+
+    #[test]
+    fn valid_p0_production_profile_accepted() {
+        assert!(validate_p0_production_profile(&valid_production_profile()).is_ok());
+    }
+
+    #[test]
+    fn production_profile_idempotence_required() {
+        let mut p = valid_production_profile();
+        p.enable_idempotence = false;
+        assert_eq!(
+            validate_production_profile(&p),
+            Err(ExtendedProfileValidationError::IdempotenceRequired)
+        );
+    }
+
+    #[test]
+    fn production_profile_unclean_election_forbidden() {
+        let mut p = valid_production_profile();
+        p.unclean_leader_election = true;
+        assert_eq!(
+            validate_production_profile(&p),
+            Err(ExtendedProfileValidationError::UncleanElectionForbidden)
+        );
+    }
+
+    #[test]
+    fn production_profile_invalid_cleanup_policy() {
+        let mut p = valid_production_profile();
+        p.cleanup_policy = "compact,delete".into();
+        assert_eq!(
+            validate_production_profile(&p),
+            Err(ExtendedProfileValidationError::InvalidCleanupPolicy)
+        );
+    }
+
+    #[test]
+    fn production_profile_topic_deletion_forbidden() {
+        let mut p = valid_production_profile();
+        p.topic_deletion_policy = "ALLOWED".into();
+        assert_eq!(
+            validate_production_profile(&p),
+            Err(ExtendedProfileValidationError::TopicDeletionForbidden)
+        );
+    }
+
+    #[test]
+    fn production_profile_invalid_max_in_flight() {
+        let mut p = valid_production_profile();
+        p.max_in_flight_requests_per_connection = 6;
+        assert_eq!(
+            validate_production_profile(&p),
+            Err(ExtendedProfileValidationError::InvalidMaxInFlight)
+        );
+    }
+
+    #[test]
+    fn production_profile_invalid_compression() {
+        let mut p = valid_production_profile();
+        p.compression = "brotli".into();
+        assert_eq!(
+            validate_production_profile(&p),
+            Err(ExtendedProfileValidationError::InvalidCompression)
+        );
+    }
+
+    #[test]
+    fn p0_production_profile_weakened_rf_rejected() {
+        let mut p = valid_production_profile();
+        p.replication_factor = 3;
+        p.min_insync_replicas = 3;
+        assert_eq!(
+            validate_p0_production_profile(&p),
+            Err(ExtendedProfileValidationError::Base(
+                ProfileValidationError::WeakenedDurability
+            ))
+        );
+    }
+
+    #[test]
+    fn delivery_retrying_variant_exists() {
+        let status = DeliveryStatus::DeliveryRetrying;
+        assert_ne!(status, DeliveryStatus::DeliveryPending);
+        assert_ne!(status, DeliveryStatus::Replicated);
     }
 }

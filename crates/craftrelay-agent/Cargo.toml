@@ -7,5 +7,10 @@ rust-version.workspace = true
 
 [dependencies]
 craftrelay-protocol = { path = "../craftrelay-protocol" }
+craftrelay-journal = { path = "../craftrelay-journal" }
+craftrelay-kafka-delivery = { path = "../craftrelay-kafka-delivery" }
 rdkafka.workspace = true
+
+[dev-dependencies]
+craftrelay-domain = { path = "../craftrelay-domain" }
 

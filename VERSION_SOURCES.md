@@ -1,6 +1,6 @@
 # Version sources
 
-Checked 2026-06-20. Versions are intentionally pinned; selection is not a claim that each component is newest. Official primary sources are linked. Java 21 is the enforced compilation/runtime line.
+Checked 2026-06-20. Versions are intentionally pinned; selection is not a claim that each component is newest. Official primary sources are linked. Java 25 is the enforced compilation/runtime line.
 
 | Component | Selected | Official source | Compatibility / rationale |
 |---|---:|---|---|
@@ -14,7 +14,7 @@ Checked 2026-06-20. Versions are intentionally pinned; selection is not a claim 
 | Apache Kafka | 3.9.1 | https://kafka.apache.org/downloads | KRaft Compose profile, RF=5/minISR=5 contract. |
 | PostgreSQL | 17.5 | https://www.postgresql.org/docs/release/17.5/ | P0 profile contract; no application connection. |
 | tokio-postgres / deadpool-postgres | 0.7.13 / 0.14.1 | https://docs.rs/tokio-postgres/0.7.13 | Future; absent from dependencies. |
-| Java | 21 | https://docs.oracle.com/en/java/javase/21/ | Enforced `[21,22)` and `--release 21`. |
+| Java | 25 | https://docs.oracle.com/en/java/javase/25/ | Enforced `[25,26)` and `--release 25`. |
 | Paper contract target | 1.21.4 | https://docs.papermc.io/paper/dev/project-setup/ | Minimum design target and maximum fixture target; no Paper runtime is compiled or tested in Sprint 0. |
 | Maven / Wrapper | 3.9.9 / 3.3.2 | https://maven.apache.org/docs/3.9.9/release-notes.html | Wrapper download pinned. |
 | gRPC Java / Protobuf | 1.72.0 / 4.30.2 | https://github.com/grpc/grpc-java/releases/tag/v1.72.0 | Future binding line; absent from Sprint 0 Java dependencies. |

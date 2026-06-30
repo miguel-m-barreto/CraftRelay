@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const MAX_ATTEMPTS: usize = 16;
 
 // ---------------------------------------------------------------------------
@@ -76,6 +76,7 @@ pub struct PersistedStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CasResult {
     Updated,
+    AlreadyConfirmed,
     StaleRevision,
     NotFound,
     InvalidTransition,
@@ -139,6 +140,145 @@ pub enum VerifyResult {
     DigestMismatch,
     Error(String),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayloadReadResult {
+    Found(Vec<u8>),
+    NotFound,
+    Corrupted { event_id: String, detail: String },
+    Error(String),
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 5: Delivery state types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryLifecycleStatus {
+    DeliveryPending,
+    DeliveryRetrying,
+    Replicated,
+    DeliveryBlocked,
+}
+
+impl DeliveryLifecycleStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DeliveryPending => "DELIVERY_PENDING",
+            Self::DeliveryRetrying => "DELIVERY_RETRYING",
+            Self::Replicated => "REPLICATED",
+            Self::DeliveryBlocked => "DELIVERY_BLOCKED",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryStateRecord {
+    pub event_id: String,
+    pub delivery_status: String,
+    pub attempt_count: i32,
+    pub next_retry_at_ms: Option<i64>,
+    pub last_error: Option<String>,
+    pub blocked_reason: Option<String>,
+    pub kafka_topic: Option<String>,
+    pub kafka_partition: Option<i32>,
+    pub kafka_offset: Option<i64>,
+    pub routing_fingerprint: Option<Checksum>,
+    pub profile_id: Option<String>,
+    pub profile_version: Option<i32>,
+    pub delivery_revision: i64,
+    pub delivery_checksum: Checksum,
+    pub confirmed_at_ms: Option<i64>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryAttemptRecord {
+    pub event_id: String,
+    pub attempt_number: i32,
+    pub outcome: String,
+    pub error_code: Option<String>,
+    pub kafka_topic: Option<String>,
+    pub kafka_partition: Option<i32>,
+    pub kafka_offset: Option<i64>,
+    pub profile_id: Option<String>,
+    pub profile_version: Option<i32>,
+    pub attempted_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplicatedDeliveryConfirmation<'a> {
+    pub expected_routing_fingerprint: &'a Checksum,
+    pub expected_profile_id: &'a str,
+    pub expected_profile_version: i32,
+    pub kafka_topic: &'a str,
+    pub kafka_partition: i32,
+    pub kafka_offset: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryStateResult {
+    Found(Box<DeliveryStateRecord>),
+    NotFound,
+    Corrupted { event_id: String, detail: String },
+    Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryCandidate {
+    pub event_id: String,
+    pub installation_id: String,
+    pub namespace: String,
+    pub logical_stream_type: String,
+    pub stream_key: String,
+    pub stream_sequence: i64,
+    pub event_type: String,
+    pub routing_version: i64,
+    pub delivery_state: DeliveryStateRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryCandidateResult {
+    Found(Box<DeliveryCandidate>),
+    NotFound,
+    Corrupted { event_id: String, detail: String },
+    Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingDelivery {
+    pub event_id: String,
+    pub journal_sequence: i64,
+    pub stream_key: String,
+    pub stream_sequence: i64,
+    pub delivery_status: String,
+    pub attempt_count: i32,
+    pub next_retry_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryScanResult {
+    Ok(Vec<PendingDelivery>),
+    Corrupted {
+        event_id: Option<String>,
+        detail: String,
+    },
+    Error(String),
+}
+
+struct DeliveryScanRow {
+    event_id: String,
+    journal_sequence: Option<i64>,
+    stream_key: Option<String>,
+    stream_sequence: Option<i64>,
+    envelope_checksum: Option<Vec<u8>>,
+    delivery_status: String,
+    attempt_count: i32,
+    next_retry_at_ms: Option<i64>,
+}
+
+const MAX_DELIVERY_ATTEMPTS: usize = 16;
 
 // ---------------------------------------------------------------------------
 // Journal config
@@ -242,6 +382,44 @@ CREATE TABLE IF NOT EXISTS write_attempt (
 );
 ";
 
+const SCHEMA_V2_SQL: &str = r"
+CREATE TABLE IF NOT EXISTS delivery_state (
+    event_id            TEXT    PRIMARY KEY
+        REFERENCES stored_envelope(event_id),
+    delivery_status     TEXT    NOT NULL,
+    attempt_count       INTEGER NOT NULL DEFAULT 0,
+    next_retry_at_ms    INTEGER,
+    last_error          TEXT,
+    blocked_reason      TEXT,
+    kafka_topic         TEXT,
+    kafka_partition     INTEGER,
+    kafka_offset        INTEGER,
+    routing_fingerprint BLOB,
+    profile_id          TEXT,
+    profile_version     INTEGER,
+    delivery_revision   INTEGER NOT NULL DEFAULT 1,
+    delivery_checksum   BLOB    NOT NULL,
+    confirmed_at_ms     INTEGER,
+    created_at_ms       INTEGER NOT NULL,
+    updated_at_ms       INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS delivery_attempt (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id        TEXT    NOT NULL
+        REFERENCES stored_envelope(event_id),
+    attempt_number  INTEGER NOT NULL,
+    outcome         TEXT    NOT NULL,
+    error_code      TEXT,
+    kafka_topic     TEXT,
+    kafka_partition INTEGER,
+    kafka_offset    INTEGER,
+    profile_id      TEXT,
+    profile_version INTEGER,
+    attempted_at_ms INTEGER NOT NULL
+);
+";
+
 // ---------------------------------------------------------------------------
 // Journal implementation
 // ---------------------------------------------------------------------------
@@ -316,14 +494,23 @@ impl LocalJournal {
 
         conn.execute_batch(SCHEMA_SQL).map_err(|e| e.to_string())?;
 
-        if existing.is_none() {
-            conn.execute(
-                "INSERT INTO journal_meta (key, value) \
-                 VALUES ('schema_version', ?1)",
-                params![SCHEMA_VERSION.to_string()],
-            )
-            .map_err(|e| e.to_string())?;
+        let existing_ver = existing
+            .as_ref()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+
+        if existing_ver < 2 {
+            conn.execute_batch(SCHEMA_V2_SQL)
+                .map_err(|e| e.to_string())?;
         }
+
+        conn.execute(
+            "INSERT OR REPLACE INTO journal_meta (key, value) \
+             VALUES ('schema_version', ?1)",
+            params![SCHEMA_VERSION.to_string()],
+        )
+        .map_err(|e| e.to_string())?;
+
         Ok(())
     }
 
@@ -704,6 +891,524 @@ impl LocalJournal {
             }
         }
     }
+
+    pub fn read_verified_payload(&self, event_id: &str) -> PayloadReadResult {
+        let conn = self.conn.lock().unwrap();
+        read_verified_payload_impl(&conn, event_id)
+    }
+
+    // --- Sprint 5: Delivery state methods ---
+
+    pub fn create_delivery_pending(
+        &self,
+        event_id: &str,
+        routing_fingerprint: &Checksum,
+        profile_id: &str,
+        profile_version: i32,
+        kafka_topic: &str,
+    ) -> CasResult {
+        let conn = self.conn.lock().unwrap();
+        let exists: bool = match conn
+            .query_row(
+                "SELECT 1 FROM stored_envelope WHERE event_id = ?1",
+                params![event_id],
+                |_| Ok(true),
+            )
+            .optional()
+        {
+            Ok(Some(exists)) => exists,
+            Ok(None) => false,
+            Err(e) => return CasResult::Error(e.to_string()),
+        };
+        if !exists {
+            return CasResult::NotFound;
+        }
+        let now_ms = now_epoch_ms();
+        let pending = DeliveryStateRecord {
+            event_id: event_id.to_string(),
+            delivery_status: "DELIVERY_PENDING".to_string(),
+            attempt_count: 0,
+            next_retry_at_ms: None,
+            last_error: None,
+            blocked_reason: None,
+            kafka_topic: Some(kafka_topic.to_string()),
+            kafka_partition: None,
+            kafka_offset: None,
+            routing_fingerprint: Some(*routing_fingerprint),
+            profile_id: Some(profile_id.to_string()),
+            profile_version: Some(profile_version),
+            delivery_revision: 1,
+            delivery_checksum: [0u8; 32],
+            confirmed_at_ms: None,
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+        };
+        let checksum = compute_delivery_checksum(&pending);
+        match conn.execute(
+            "INSERT INTO delivery_state (\
+                event_id, delivery_status, attempt_count, \
+                kafka_topic, routing_fingerprint, profile_id, profile_version, \
+                delivery_revision, delivery_checksum, \
+                created_at_ms, updated_at_ms\
+             ) VALUES (?1, 'DELIVERY_PENDING', 0, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?7)",
+            params![
+                event_id,
+                kafka_topic,
+                routing_fingerprint.as_slice(),
+                profile_id,
+                profile_version,
+                checksum.as_slice(),
+                now_ms,
+            ],
+        ) {
+            Ok(_) => CasResult::Updated,
+            Err(e) => CasResult::Error(e.to_string()),
+        }
+    }
+
+    pub fn record_delivery_attempt(&self, attempt: &DeliveryAttemptRecord) -> CasResult {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = match conn.transaction() {
+            Ok(tx) => tx,
+            Err(e) => return CasResult::Error(e.to_string()),
+        };
+        let now_ms = now_epoch_ms();
+        let mut state = match load_delivery_state(&tx, &attempt.event_id) {
+            DeliveryStateResult::Found(state) => *state,
+            DeliveryStateResult::NotFound => return CasResult::NotFound,
+            DeliveryStateResult::Corrupted { event_id, detail } => {
+                return CasResult::Corrupted { event_id, detail };
+            }
+            DeliveryStateResult::Error(e) => return CasResult::Error(e),
+        };
+        if let Err(e) = tx.execute(
+            "INSERT INTO delivery_attempt (\
+                event_id, attempt_number, outcome, error_code, \
+                kafka_topic, kafka_partition, kafka_offset, \
+                profile_id, profile_version, attempted_at_ms\
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                attempt.event_id,
+                attempt.attempt_number,
+                attempt.outcome,
+                attempt.error_code,
+                attempt.kafka_topic,
+                attempt.kafka_partition,
+                attempt.kafka_offset,
+                attempt.profile_id,
+                attempt.profile_version,
+                attempt.attempted_at_ms,
+            ],
+        ) {
+            return CasResult::Error(e.to_string());
+        }
+        if let Err(e) = tx.execute(
+            "DELETE FROM delivery_attempt WHERE id IN (\
+                SELECT id FROM delivery_attempt \
+                WHERE event_id = ?1 \
+                ORDER BY id DESC \
+                LIMIT -1 OFFSET ?2\
+             )",
+            params![attempt.event_id, MAX_DELIVERY_ATTEMPTS as i64],
+        ) {
+            return CasResult::Error(e.to_string());
+        }
+        state.attempt_count += 1;
+        state.last_error = attempt.error_code.clone();
+        state.updated_at_ms = now_ms;
+        let checksum = compute_delivery_checksum(&state);
+        let affected = match tx.execute(
+            "UPDATE delivery_state SET \
+             attempt_count = attempt_count + 1, \
+             last_error = ?1, delivery_checksum = ?2, updated_at_ms = ?3 \
+             WHERE event_id = ?4 AND delivery_revision = ?5",
+            params![
+                attempt.error_code,
+                checksum.as_slice(),
+                now_ms,
+                attempt.event_id,
+                state.delivery_revision,
+            ],
+        ) {
+            Ok(n) => n,
+            Err(e) => return CasResult::Error(e.to_string()),
+        };
+        match affected {
+            1 => match tx.commit() {
+                Ok(()) => CasResult::Updated,
+                Err(e) => CasResult::Error(e.to_string()),
+            },
+            0 => CasResult::StaleRevision,
+            n => CasResult::Error(format!(
+                "delivery attempt state update affected {n} rows, expected 1"
+            )),
+        }
+    }
+
+    pub fn confirm_replicated_delivery(
+        &self,
+        event_id: &str,
+        expected_delivery_revision: i64,
+        confirmation: ReplicatedDeliveryConfirmation<'_>,
+    ) -> CasResult {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = match conn.transaction() {
+            Ok(t) => t,
+            Err(e) => return CasResult::Error(e.to_string()),
+        };
+        let current = match load_delivery_state(&tx, event_id) {
+            DeliveryStateResult::Found(state) => *state,
+            DeliveryStateResult::NotFound => return CasResult::NotFound,
+            DeliveryStateResult::Corrupted { event_id, detail } => {
+                return CasResult::Corrupted { event_id, detail };
+            }
+            DeliveryStateResult::Error(e) => return CasResult::Error(e),
+        };
+        if current.delivery_status == "REPLICATED" {
+            let lifecycle = match load_verified_lifecycle_for_transition(&tx, event_id) {
+                Ok(lifecycle) => lifecycle,
+                Err(result) => return result,
+            };
+            if lifecycle.delivery_status != "REPLICATED" {
+                return CasResult::Corrupted {
+                    event_id: event_id.to_string(),
+                    detail: "replicated delivery state without replicated lifecycle".into(),
+                };
+            }
+            let same_confirmation = current.kafka_topic.as_deref()
+                == Some(confirmation.kafka_topic)
+                && current.kafka_partition == Some(confirmation.kafka_partition)
+                && current.kafka_offset == Some(confirmation.kafka_offset)
+                && current.routing_fingerprint == Some(*confirmation.expected_routing_fingerprint)
+                && current.profile_id.as_deref() == Some(confirmation.expected_profile_id)
+                && current.profile_version == Some(confirmation.expected_profile_version);
+            return if same_confirmation {
+                CasResult::AlreadyConfirmed
+            } else {
+                CasResult::Corrupted {
+                    event_id: event_id.to_string(),
+                    detail: "conflicting replicated confirmation metadata".into(),
+                }
+            };
+        }
+        let lifecycle = match load_verified_lifecycle_for_transition(&tx, event_id) {
+            Ok(lifecycle) => lifecycle,
+            Err(result) => return result,
+        };
+        if current.delivery_revision != expected_delivery_revision {
+            return CasResult::StaleRevision;
+        }
+        if current.routing_fingerprint != Some(*confirmation.expected_routing_fingerprint) {
+            return CasResult::Corrupted {
+                event_id: event_id.to_string(),
+                detail: "routing fingerprint mismatch".into(),
+            };
+        }
+        if current.profile_id.as_deref() != Some(confirmation.expected_profile_id)
+            || current.profile_version != Some(confirmation.expected_profile_version)
+        {
+            return CasResult::Corrupted {
+                event_id: event_id.to_string(),
+                detail: "profile mismatch".into(),
+            };
+        }
+        if current.kafka_topic.as_deref() != Some(confirmation.kafka_topic) {
+            return CasResult::Corrupted {
+                event_id: event_id.to_string(),
+                detail: "kafka topic mismatch".into(),
+            };
+        }
+        let now_ms = now_epoch_ms();
+        let new_rev = expected_delivery_revision + 1;
+        let mut next = current;
+        next.delivery_status = "REPLICATED".to_string();
+        next.next_retry_at_ms = None;
+        next.last_error = None;
+        next.blocked_reason = None;
+        next.kafka_topic = Some(confirmation.kafka_topic.to_string());
+        next.kafka_partition = Some(confirmation.kafka_partition);
+        next.kafka_offset = Some(confirmation.kafka_offset);
+        next.delivery_revision = new_rev;
+        next.confirmed_at_ms = Some(now_ms);
+        next.updated_at_ms = now_ms;
+        let checksum = compute_delivery_checksum(&next);
+        let affected = match tx.execute(
+            "UPDATE delivery_state SET \
+             delivery_status = 'REPLICATED', \
+             kafka_topic = ?1, kafka_partition = ?2, kafka_offset = ?3, \
+             delivery_revision = ?4, delivery_checksum = ?5, \
+             confirmed_at_ms = ?6, updated_at_ms = ?6, \
+             next_retry_at_ms = NULL, last_error = NULL, blocked_reason = NULL \
+             WHERE event_id = ?7 AND delivery_revision = ?8",
+            params![
+                confirmation.kafka_topic,
+                confirmation.kafka_partition,
+                confirmation.kafka_offset,
+                new_rev,
+                checksum.as_slice(),
+                now_ms,
+                event_id,
+                expected_delivery_revision,
+            ],
+        ) {
+            Ok(n) => n,
+            Err(e) => return CasResult::Error(e.to_string()),
+        };
+        if affected != 1 {
+            return CasResult::StaleRevision;
+        }
+        match update_lifecycle_delivery_status(&tx, event_id, &lifecycle, "REPLICATED", now_ms) {
+            CasResult::Updated => {}
+            other => return other,
+        }
+        match tx.commit() {
+            Ok(()) => CasResult::Updated,
+            Err(e) => CasResult::Error(e.to_string()),
+        }
+    }
+
+    pub fn block_delivery(
+        &self,
+        event_id: &str,
+        expected_delivery_revision: i64,
+        reason: &str,
+    ) -> CasResult {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = match conn.transaction() {
+            Ok(t) => t,
+            Err(e) => return CasResult::Error(e.to_string()),
+        };
+        let current = match load_delivery_state(&tx, event_id) {
+            DeliveryStateResult::Found(state) => *state,
+            DeliveryStateResult::NotFound => return CasResult::NotFound,
+            DeliveryStateResult::Corrupted { event_id, detail } => {
+                return CasResult::Corrupted { event_id, detail };
+            }
+            DeliveryStateResult::Error(e) => return CasResult::Error(e),
+        };
+        let lifecycle = match load_verified_lifecycle_for_transition(&tx, event_id) {
+            Ok(lifecycle) => lifecycle,
+            Err(result) => return result,
+        };
+        if current.delivery_revision != expected_delivery_revision {
+            return CasResult::StaleRevision;
+        }
+        if current.delivery_status == "REPLICATED" {
+            return CasResult::InvalidTransition;
+        }
+        let now_ms = now_epoch_ms();
+        let new_rev = expected_delivery_revision + 1;
+        let mut next = current;
+        next.delivery_status = "DELIVERY_BLOCKED".to_string();
+        next.next_retry_at_ms = None;
+        next.blocked_reason = Some(reason.to_string());
+        next.delivery_revision = new_rev;
+        next.updated_at_ms = now_ms;
+        let checksum = compute_delivery_checksum(&next);
+        let affected = match tx.execute(
+            "UPDATE delivery_state SET \
+             delivery_status = 'DELIVERY_BLOCKED', \
+             blocked_reason = ?1, \
+             delivery_revision = ?2, delivery_checksum = ?3, \
+             updated_at_ms = ?4, \
+             next_retry_at_ms = NULL \
+             WHERE event_id = ?5 AND delivery_revision = ?6",
+            params![
+                reason,
+                new_rev,
+                checksum.as_slice(),
+                now_ms,
+                event_id,
+                expected_delivery_revision,
+            ],
+        ) {
+            Ok(n) => n,
+            Err(e) => return CasResult::Error(e.to_string()),
+        };
+        if affected != 1 {
+            return CasResult::StaleRevision;
+        }
+        match update_lifecycle_delivery_status(
+            &tx,
+            event_id,
+            &lifecycle,
+            "DELIVERY_BLOCKED",
+            now_ms,
+        ) {
+            CasResult::Updated => {}
+            other => return other,
+        }
+        match tx.commit() {
+            Ok(()) => CasResult::Updated,
+            Err(e) => CasResult::Error(e.to_string()),
+        }
+    }
+
+    pub fn update_delivery_retry(
+        &self,
+        event_id: &str,
+        expected_delivery_revision: i64,
+        next_retry_at_ms: i64,
+    ) -> CasResult {
+        let conn = self.conn.lock().unwrap();
+        let current = match load_delivery_state(&conn, event_id) {
+            DeliveryStateResult::Found(state) => *state,
+            DeliveryStateResult::NotFound => return CasResult::NotFound,
+            DeliveryStateResult::Corrupted { event_id, detail } => {
+                return CasResult::Corrupted { event_id, detail };
+            }
+            DeliveryStateResult::Error(e) => return CasResult::Error(e),
+        };
+        if current.delivery_revision != expected_delivery_revision {
+            return CasResult::StaleRevision;
+        }
+        if current.delivery_status == "REPLICATED" {
+            return CasResult::InvalidTransition;
+        }
+        let now_ms = now_epoch_ms();
+        let new_rev = expected_delivery_revision + 1;
+        let mut next = current;
+        next.delivery_status = "DELIVERY_RETRYING".to_string();
+        next.next_retry_at_ms = Some(next_retry_at_ms);
+        next.delivery_revision = new_rev;
+        next.updated_at_ms = now_ms;
+        let checksum = compute_delivery_checksum(&next);
+        let affected = match conn.execute(
+            "UPDATE delivery_state SET \
+             delivery_status = 'DELIVERY_RETRYING', \
+             next_retry_at_ms = ?1, \
+             delivery_revision = ?2, delivery_checksum = ?3, \
+             updated_at_ms = ?4 \
+             WHERE event_id = ?5 AND delivery_revision = ?6",
+            params![
+                next_retry_at_ms,
+                new_rev,
+                checksum.as_slice(),
+                now_ms,
+                event_id,
+                expected_delivery_revision,
+            ],
+        ) {
+            Ok(n) => n,
+            Err(e) => return CasResult::Error(e.to_string()),
+        };
+        match affected {
+            1 => CasResult::Updated,
+            0 => CasResult::StaleRevision,
+            n => CasResult::Error(format!(
+                "delivery retry update affected {n} rows, expected 1"
+            )),
+        }
+    }
+
+    pub fn scan_pending_deliveries(&self, limit: i32) -> DeliveryScanResult {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT d.event_id, e.journal_sequence, \
+                    e.stream_key, e.stream_sequence, \
+                    e.envelope_checksum, \
+                    d.delivery_status, d.attempt_count, d.next_retry_at_ms \
+             FROM delivery_state d \
+             LEFT JOIN stored_envelope e ON d.event_id = e.event_id \
+             WHERE d.delivery_status = 'DELIVERY_PENDING' \
+             ORDER BY e.journal_sequence ASC \
+             LIMIT ?1",
+        ) {
+            Ok(s) => s,
+            Err(e) => return DeliveryScanResult::Error(e.to_string()),
+        };
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                Ok(DeliveryScanRow {
+                    event_id: row.get(0)?,
+                    journal_sequence: row.get(1)?,
+                    stream_key: row.get(2)?,
+                    stream_sequence: row.get(3)?,
+                    envelope_checksum: row.get(4)?,
+                    delivery_status: row.get(5)?,
+                    attempt_count: row.get(6)?,
+                    next_retry_at_ms: row.get(7)?,
+                })
+            })
+            .map_err(|e| e.to_string());
+        collect_delivery_scan(&conn, rows)
+    }
+
+    pub fn scan_retrying_deliveries(&self, now_ms: i64, limit: i32) -> DeliveryScanResult {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT d.event_id, e.journal_sequence, \
+                    e.stream_key, e.stream_sequence, \
+                    e.envelope_checksum, \
+                    d.delivery_status, d.attempt_count, d.next_retry_at_ms \
+             FROM delivery_state d \
+             LEFT JOIN stored_envelope e ON d.event_id = e.event_id \
+             WHERE d.delivery_status = 'DELIVERY_RETRYING' \
+               AND d.next_retry_at_ms <= ?1 \
+             ORDER BY d.next_retry_at_ms ASC \
+             LIMIT ?2",
+        ) {
+            Ok(s) => s,
+            Err(e) => return DeliveryScanResult::Error(e.to_string()),
+        };
+        let rows = stmt
+            .query_map(params![now_ms, limit], |row| {
+                Ok(DeliveryScanRow {
+                    event_id: row.get(0)?,
+                    journal_sequence: row.get(1)?,
+                    stream_key: row.get(2)?,
+                    stream_sequence: row.get(3)?,
+                    envelope_checksum: row.get(4)?,
+                    delivery_status: row.get(5)?,
+                    attempt_count: row.get(6)?,
+                    next_retry_at_ms: row.get(7)?,
+                })
+            })
+            .map_err(|e| e.to_string());
+        collect_delivery_scan(&conn, rows)
+    }
+
+    pub fn scan_delivery_gate_states(&self, limit: i32) -> DeliveryScanResult {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT d.event_id, e.journal_sequence, \
+                    e.stream_key, e.stream_sequence, \
+                    e.envelope_checksum, \
+                    d.delivery_status, d.attempt_count, d.next_retry_at_ms \
+             FROM delivery_state d \
+             LEFT JOIN stored_envelope e ON d.event_id = e.event_id \
+             ORDER BY e.journal_sequence ASC \
+             LIMIT ?1",
+        ) {
+            Ok(s) => s,
+            Err(e) => return DeliveryScanResult::Error(e.to_string()),
+        };
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                Ok(DeliveryScanRow {
+                    event_id: row.get(0)?,
+                    journal_sequence: row.get(1)?,
+                    stream_key: row.get(2)?,
+                    stream_sequence: row.get(3)?,
+                    envelope_checksum: row.get(4)?,
+                    delivery_status: row.get(5)?,
+                    attempt_count: row.get(6)?,
+                    next_retry_at_ms: row.get(7)?,
+                })
+            })
+            .map_err(|e| e.to_string());
+        collect_delivery_scan(&conn, rows)
+    }
+
+    pub fn get_delivery_state(&self, event_id: &str) -> DeliveryStateResult {
+        let conn = self.conn.lock().unwrap();
+        load_delivery_state(&conn, event_id)
+    }
+
+    pub fn get_delivery_candidate(&self, event_id: &str) -> DeliveryCandidateResult {
+        let conn = self.conn.lock().unwrap();
+        load_delivery_candidate(&conn, event_id)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -977,6 +1682,78 @@ fn verify_payload_digest(conn: &Connection, event_id: &str) -> Result<(), String
     Ok(())
 }
 
+fn read_verified_payload_impl(conn: &Connection, event_id: &str) -> PayloadReadResult {
+    let envelope_digest = match conn
+        .query_row(
+            "SELECT payload_digest FROM stored_envelope WHERE event_id = ?1",
+            params![event_id],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+    {
+        Ok(Some(digest)) => digest,
+        Ok(None) => return PayloadReadResult::NotFound,
+        Err(e) => {
+            return PayloadReadResult::Error(format!(
+                "stored envelope payload digest query error: {e}"
+            ));
+        }
+    };
+    if envelope_digest.len() != 32 {
+        return PayloadReadResult::Corrupted {
+            event_id: event_id.to_string(),
+            detail: format!(
+                "stored envelope payload_digest length {}, expected 32",
+                envelope_digest.len()
+            ),
+        };
+    }
+
+    let (payload, blob_digest) = match conn
+        .query_row(
+            "SELECT payload, payload_digest FROM payload_blob \
+             WHERE event_id = ?1",
+            params![event_id],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return PayloadReadResult::Corrupted {
+                event_id: event_id.to_string(),
+                detail: "payload blob not found".into(),
+            };
+        }
+        Err(e) => return PayloadReadResult::Error(format!("payload blob query error: {e}")),
+    };
+    if blob_digest.len() != 32 {
+        return PayloadReadResult::Corrupted {
+            event_id: event_id.to_string(),
+            detail: format!(
+                "payload blob payload_digest length {}, expected 32",
+                blob_digest.len()
+            ),
+        };
+    }
+    if blob_digest.as_slice() != envelope_digest.as_slice() {
+        return PayloadReadResult::Corrupted {
+            event_id: event_id.to_string(),
+            detail: "payload blob digest differs from stored envelope digest".into(),
+        };
+    }
+
+    let actual = compute_sha256(&payload);
+    if actual.as_slice() != envelope_digest.as_slice() {
+        return PayloadReadResult::Corrupted {
+            event_id: event_id.to_string(),
+            detail: "payload digest mismatch".into(),
+        };
+    }
+
+    PayloadReadResult::Found(payload)
+}
+
 fn compute_lifecycle_checksum(
     event_id: &str,
     revision: i64,
@@ -1016,10 +1793,547 @@ fn record_attempt(
     );
 }
 
+fn compute_delivery_checksum(state: &DeliveryStateRecord) -> Checksum {
+    // `updated_at_ms` is intentionally excluded: ordinary attempt bookkeeping
+    // updates it, while the checksum protects the mutable delivery state itself.
+    craftrelay_domain::sha256(
+        format!(
+            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            state.event_id,
+            state.delivery_status,
+            state.attempt_count,
+            state
+                .next_retry_at_ms
+                .map_or(String::new(), |v| v.to_string()),
+            state.last_error.as_deref().unwrap_or(""),
+            state.blocked_reason.as_deref().unwrap_or(""),
+            state.kafka_topic.as_deref().unwrap_or(""),
+            state
+                .kafka_partition
+                .map_or(String::new(), |v| v.to_string()),
+            state.kafka_offset.map_or(String::new(), |v| v.to_string()),
+            state
+                .routing_fingerprint
+                .as_ref()
+                .map_or(String::new(), checksum_hex),
+            state.profile_id.as_deref().unwrap_or(""),
+            state
+                .profile_version
+                .map_or(String::new(), |v| v.to_string()),
+            state.delivery_revision,
+            state
+                .confirmed_at_ms
+                .map_or(String::new(), |v| v.to_string()),
+            state.created_at_ms,
+        )
+        .as_bytes(),
+    )
+}
+
+fn checksum_hex(checksum: &Checksum) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for byte in checksum {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0F) as usize] as char);
+    }
+    out
+}
+
+fn load_delivery_state(conn: &Connection, event_id: &str) -> DeliveryStateResult {
+    let row = match conn
+        .query_row(
+            "SELECT delivery_status, attempt_count, next_retry_at_ms, \
+                    last_error, blocked_reason, kafka_topic, \
+                    kafka_partition, kafka_offset, routing_fingerprint, \
+                    profile_id, profile_version, delivery_revision, \
+                    delivery_checksum, confirmed_at_ms, \
+                    created_at_ms, updated_at_ms \
+             FROM delivery_state WHERE event_id = ?1",
+            params![event_id],
+            |row| {
+                let rf: Option<Vec<u8>> = row.get(8)?;
+                let dc: Vec<u8> = row.get(12)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i32>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<i32>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    rf,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<i32>>(10)?,
+                    row.get::<_, i64>(11)?,
+                    dc,
+                    row.get::<_, Option<i64>>(13)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, i64>(15)?,
+                ))
+            },
+        )
+        .optional()
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return DeliveryStateResult::NotFound,
+        Err(e) => return DeliveryStateResult::Error(e.to_string()),
+    };
+    let (
+        status,
+        attempt_count,
+        next_retry,
+        last_err,
+        blocked,
+        topic,
+        partition,
+        offset,
+        rf_bytes,
+        prof_id,
+        prof_ver,
+        rev,
+        dc_bytes,
+        confirmed,
+        created,
+        updated,
+    ) = row;
+    if dc_bytes.len() != 32 {
+        return DeliveryStateResult::Corrupted {
+            event_id: event_id.to_string(),
+            detail: "delivery checksum length invalid".into(),
+        };
+    }
+    let mut delivery_checksum = [0u8; 32];
+    delivery_checksum.copy_from_slice(&dc_bytes);
+    let routing_fingerprint = match rf_bytes {
+        Some(v) if v.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&v);
+            Some(arr)
+        }
+        Some(_) => {
+            return DeliveryStateResult::Corrupted {
+                event_id: event_id.to_string(),
+                detail: "routing fingerprint length invalid".into(),
+            };
+        }
+        None => None,
+    };
+    if !matches!(
+        status.as_str(),
+        "DELIVERY_PENDING" | "DELIVERY_RETRYING" | "REPLICATED" | "DELIVERY_BLOCKED"
+    ) {
+        return DeliveryStateResult::Corrupted {
+            event_id: event_id.to_string(),
+            detail: format!("unsupported delivery state status: {status}"),
+        };
+    }
+    let state = DeliveryStateRecord {
+        event_id: event_id.to_string(),
+        delivery_status: status,
+        attempt_count,
+        next_retry_at_ms: next_retry,
+        last_error: last_err,
+        blocked_reason: blocked,
+        kafka_topic: topic,
+        kafka_partition: partition,
+        kafka_offset: offset,
+        routing_fingerprint,
+        profile_id: prof_id,
+        profile_version: prof_ver,
+        delivery_revision: rev,
+        delivery_checksum,
+        confirmed_at_ms: confirmed,
+        created_at_ms: created,
+        updated_at_ms: updated,
+    };
+    let expected = compute_delivery_checksum(&state);
+    if state.delivery_checksum != expected {
+        return DeliveryStateResult::Corrupted {
+            event_id: event_id.to_string(),
+            detail: "delivery checksum mismatch".into(),
+        };
+    }
+    if let Err(detail) = validate_delivery_state_invariants(&state) {
+        return DeliveryStateResult::Corrupted {
+            event_id: event_id.to_string(),
+            detail,
+        };
+    }
+    DeliveryStateResult::Found(Box::new(state))
+}
+
+fn validate_delivery_state_invariants(state: &DeliveryStateRecord) -> Result<(), String> {
+    let status = state.delivery_status.as_str();
+    match status {
+        "REPLICATED" => {
+            require_non_empty(state.kafka_topic.as_deref(), "kafka_topic", status)?;
+            require_some(
+                state.routing_fingerprint.as_ref(),
+                "routing_fingerprint",
+                status,
+            )?;
+            require_non_empty(state.profile_id.as_deref(), "profile_id", status)?;
+            require_positive_i32(state.profile_version, "profile_version", status)?;
+            require_non_negative_i32(state.kafka_partition, "kafka_partition", status)?;
+            require_non_negative_i64(state.kafka_offset, "kafka_offset", status)?;
+            require_some(state.confirmed_at_ms.as_ref(), "confirmed_at_ms", status)?;
+            require_absent(state.blocked_reason.as_ref(), "blocked_reason", status)?;
+            require_absent(state.next_retry_at_ms.as_ref(), "next_retry_at_ms", status)?;
+        }
+        "DELIVERY_PENDING" => {
+            require_delivery_routing_fields(state, status)?;
+            require_absent(state.next_retry_at_ms.as_ref(), "next_retry_at_ms", status)?;
+            require_absent(state.blocked_reason.as_ref(), "blocked_reason", status)?;
+            require_no_confirmed_kafka_metadata(state, status)?;
+        }
+        "DELIVERY_RETRYING" => {
+            require_delivery_routing_fields(state, status)?;
+            require_some(state.next_retry_at_ms.as_ref(), "next_retry_at_ms", status)?;
+            require_absent(state.blocked_reason.as_ref(), "blocked_reason", status)?;
+            require_no_confirmed_kafka_metadata(state, status)?;
+        }
+        "DELIVERY_BLOCKED" => {
+            require_non_empty(state.blocked_reason.as_deref(), "blocked_reason", status)?;
+            require_absent(state.next_retry_at_ms.as_ref(), "next_retry_at_ms", status)?;
+            require_no_confirmed_kafka_metadata(state, status)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn require_delivery_routing_fields(
+    state: &DeliveryStateRecord,
+    status: &str,
+) -> Result<(), String> {
+    require_non_empty(state.kafka_topic.as_deref(), "kafka_topic", status)?;
+    require_some(
+        state.routing_fingerprint.as_ref(),
+        "routing_fingerprint",
+        status,
+    )?;
+    require_non_empty(state.profile_id.as_deref(), "profile_id", status)?;
+    require_positive_i32(state.profile_version, "profile_version", status)
+}
+
+fn require_no_confirmed_kafka_metadata(
+    state: &DeliveryStateRecord,
+    status: &str,
+) -> Result<(), String> {
+    require_absent(state.kafka_partition.as_ref(), "kafka_partition", status)?;
+    require_absent(state.kafka_offset.as_ref(), "kafka_offset", status)?;
+    require_absent(state.confirmed_at_ms.as_ref(), "confirmed_at_ms", status)
+}
+
+fn require_some<T>(value: Option<&T>, field: &str, status: &str) -> Result<(), String> {
+    if value.is_some() {
+        Ok(())
+    } else {
+        Err(format!("{status} delivery state missing {field}"))
+    }
+}
+
+fn require_non_empty(value: Option<&str>, field: &str, status: &str) -> Result<(), String> {
+    match value {
+        Some(v) if !v.is_empty() => Ok(()),
+        Some(_) => Err(format!("{status} delivery state has empty {field}")),
+        None => Err(format!("{status} delivery state missing {field}")),
+    }
+}
+
+fn require_absent<T>(value: Option<&T>, field: &str, status: &str) -> Result<(), String> {
+    if value.is_none() {
+        Ok(())
+    } else {
+        Err(format!("{status} delivery state must not contain {field}"))
+    }
+}
+
+fn require_positive_i32(value: Option<i32>, field: &str, status: &str) -> Result<(), String> {
+    match value {
+        Some(v) if v > 0 => Ok(()),
+        Some(_) => Err(format!("{status} delivery state has invalid {field}")),
+        None => Err(format!("{status} delivery state missing {field}")),
+    }
+}
+
+fn require_non_negative_i32(value: Option<i32>, field: &str, status: &str) -> Result<(), String> {
+    match value {
+        Some(v) if v >= 0 => Ok(()),
+        Some(_) => Err(format!("{status} delivery state has invalid {field}")),
+        None => Err(format!("{status} delivery state missing {field}")),
+    }
+}
+
+fn require_non_negative_i64(value: Option<i64>, field: &str, status: &str) -> Result<(), String> {
+    match value {
+        Some(v) if v >= 0 => Ok(()),
+        Some(_) => Err(format!("{status} delivery state has invalid {field}")),
+        None => Err(format!("{status} delivery state missing {field}")),
+    }
+}
+
+fn load_delivery_candidate(conn: &Connection, event_id: &str) -> DeliveryCandidateResult {
+    let delivery_state = match load_delivery_state(conn, event_id) {
+        DeliveryStateResult::Found(state) => *state,
+        DeliveryStateResult::NotFound => return DeliveryCandidateResult::NotFound,
+        DeliveryStateResult::Corrupted { event_id, detail } => {
+            return DeliveryCandidateResult::Corrupted { event_id, detail };
+        }
+        DeliveryStateResult::Error(e) => return DeliveryCandidateResult::Error(e),
+    };
+
+    let row = match conn
+        .query_row(
+            "SELECT installation_id, namespace, logical_stream_type, \
+                    stream_key, stream_sequence, event_type, \
+                    routing_version, envelope_checksum \
+             FROM stored_envelope WHERE event_id = ?1",
+            params![event_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                ))
+            },
+        )
+        .optional()
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return DeliveryCandidateResult::Corrupted {
+                event_id: event_id.to_string(),
+                detail: "stored envelope missing for delivery state".into(),
+            };
+        }
+        Err(e) => {
+            return DeliveryCandidateResult::Corrupted {
+                event_id: event_id.to_string(),
+                detail: format!("delivery candidate envelope query error: {e}"),
+            };
+        }
+    };
+
+    let (
+        installation_id,
+        namespace,
+        logical_stream_type,
+        stream_key,
+        stream_sequence,
+        event_type,
+        routing_version,
+        envelope_checksum_bytes,
+    ) = row;
+    if envelope_checksum_bytes.len() != 32 {
+        return DeliveryCandidateResult::Corrupted {
+            event_id: event_id.to_string(),
+            detail: format!(
+                "envelope checksum length {}, expected 32",
+                envelope_checksum_bytes.len()
+            ),
+        };
+    }
+    let mut envelope_checksum = [0u8; 32];
+    envelope_checksum.copy_from_slice(&envelope_checksum_bytes);
+
+    match recompute_envelope_checksum_from_row(conn, event_id) {
+        Ok(expected) if envelope_checksum == expected => {}
+        Ok(_) => {
+            return DeliveryCandidateResult::Corrupted {
+                event_id: event_id.to_string(),
+                detail: "envelope checksum mismatch".into(),
+            };
+        }
+        Err(detail) => {
+            return DeliveryCandidateResult::Corrupted {
+                event_id: event_id.to_string(),
+                detail,
+            };
+        }
+    }
+
+    DeliveryCandidateResult::Found(Box::new(DeliveryCandidate {
+        event_id: event_id.to_string(),
+        installation_id,
+        namespace,
+        logical_stream_type,
+        stream_key,
+        stream_sequence,
+        event_type,
+        routing_version,
+        delivery_state,
+    }))
+}
+
+fn load_verified_lifecycle_for_transition(
+    tx: &Transaction<'_>,
+    event_id: &str,
+) -> Result<PersistedStatus, CasResult> {
+    match get_status_impl(tx, event_id) {
+        StatusResult::Found(status) => Ok(status),
+        StatusResult::NotFound => Err(CasResult::Corrupted {
+            event_id: event_id.to_string(),
+            detail: "lifecycle state missing for delivery transition".into(),
+        }),
+        StatusResult::Corrupted { event_id, detail } => {
+            Err(CasResult::Corrupted { event_id, detail })
+        }
+    }
+}
+
+fn update_lifecycle_delivery_status(
+    tx: &Transaction<'_>,
+    event_id: &str,
+    current: &PersistedStatus,
+    new_delivery_status: &str,
+    now_ms: i64,
+) -> CasResult {
+    let new_revision = current.lifecycle_revision + 1;
+    let checksum = compute_lifecycle_checksum(
+        event_id,
+        new_revision,
+        new_delivery_status,
+        &current.retention_status,
+    );
+    let affected = match tx.execute(
+        "UPDATE lifecycle_state SET \
+         revision = ?1, lifecycle_checksum = ?2, \
+         delivery_status = ?3, updated_at_ms = ?4 \
+         WHERE event_id = ?5 AND revision = ?6",
+        params![
+            new_revision,
+            checksum.as_slice(),
+            new_delivery_status,
+            now_ms,
+            event_id,
+            current.lifecycle_revision,
+        ],
+    ) {
+        Ok(n) => n,
+        Err(e) => return CasResult::Error(e.to_string()),
+    };
+    match affected {
+        1 => CasResult::Updated,
+        0 => CasResult::StaleRevision,
+        n => CasResult::Error(format!(
+            "lifecycle delivery update affected {n} rows, expected 1"
+        )),
+    }
+}
+
+fn collect_delivery_scan<I>(conn: &Connection, rows: Result<I, String>) -> DeliveryScanResult
+where
+    I: Iterator<Item = rusqlite::Result<DeliveryScanRow>>,
+{
+    let mut deliveries = Vec::new();
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(e) => return DeliveryScanResult::Error(e),
+    };
+    for row in rows {
+        let pending = match row {
+            Ok(pending) => pending,
+            Err(e) => {
+                return DeliveryScanResult::Corrupted {
+                    event_id: None,
+                    detail: format!("delivery scan row conversion error: {e}"),
+                };
+            }
+        };
+        match load_delivery_state(conn, &pending.event_id) {
+            DeliveryStateResult::Found(_) => {}
+            DeliveryStateResult::NotFound => {
+                return DeliveryScanResult::Corrupted {
+                    event_id: Some(pending.event_id),
+                    detail: "delivery state disappeared during scan".into(),
+                };
+            }
+            DeliveryStateResult::Corrupted { event_id, detail } => {
+                return DeliveryScanResult::Corrupted {
+                    event_id: Some(event_id),
+                    detail,
+                };
+            }
+            DeliveryStateResult::Error(e) => return DeliveryScanResult::Error(e),
+        }
+        match verify_delivery_scan_envelope(conn, pending) {
+            Ok(pending) => deliveries.push(pending),
+            Err((event_id, detail)) => {
+                return DeliveryScanResult::Corrupted {
+                    event_id: Some(event_id),
+                    detail,
+                };
+            }
+        }
+    }
+    DeliveryScanResult::Ok(deliveries)
+}
+
+fn verify_delivery_scan_envelope(
+    conn: &Connection,
+    row: DeliveryScanRow,
+) -> Result<PendingDelivery, (String, String)> {
+    let event_id = row.event_id;
+    let Some(journal_sequence) = row.journal_sequence else {
+        return Err((event_id, "stored envelope missing for delivery scan".into()));
+    };
+    let Some(stream_key) = row.stream_key else {
+        return Err((event_id, "stored envelope missing for delivery scan".into()));
+    };
+    let Some(stream_sequence) = row.stream_sequence else {
+        return Err((event_id, "stored envelope missing for delivery scan".into()));
+    };
+    let Some(envelope_checksum_bytes) = row.envelope_checksum else {
+        return Err((event_id, "stored envelope missing for delivery scan".into()));
+    };
+    if envelope_checksum_bytes.len() != 32 {
+        return Err((
+            event_id,
+            format!(
+                "envelope checksum length {}, expected 32",
+                envelope_checksum_bytes.len()
+            ),
+        ));
+    }
+    let mut envelope_checksum = [0u8; 32];
+    envelope_checksum.copy_from_slice(&envelope_checksum_bytes);
+    match recompute_envelope_checksum_from_row(conn, &event_id) {
+        Ok(expected) if envelope_checksum == expected => {}
+        Ok(_) => {
+            return Err((event_id, "envelope checksum mismatch".into()));
+        }
+        Err(detail) => {
+            return Err((event_id, detail));
+        }
+    }
+
+    Ok(PendingDelivery {
+        event_id,
+        journal_sequence,
+        stream_key,
+        stream_sequence,
+        delivery_status: row.delivery_status,
+        attempt_count: row.attempt_count,
+        next_retry_at_ms: row.next_retry_at_ms,
+    })
+}
+
 fn is_allowed_delivery_status(status: &str) -> bool {
     matches!(
         status,
-        "LOCAL_ACCEPTED" | "DELIVERY_PENDING" | "DELIVERY_BLOCKED"
+        "LOCAL_ACCEPTED"
+            | "DELIVERY_PENDING"
+            | "DELIVERY_RETRYING"
+            | "REPLICATED"
+            | "DELIVERY_BLOCKED"
     )
 }
 
@@ -1174,6 +2488,26 @@ mod tests {
 
     fn mem() -> LocalJournal {
         LocalJournal::open_in_memory(cfg(), Box::new(AlwaysSafeDiskGuard)).unwrap()
+    }
+
+    fn topic() -> &'static str {
+        "craftrelay.inst-a.economy.events"
+    }
+
+    fn confirmation<'a>(
+        fp: &'a Checksum,
+        topic: &'a str,
+        partition: i32,
+        offset: i64,
+    ) -> ReplicatedDeliveryConfirmation<'a> {
+        ReplicatedDeliveryConfirmation {
+            expected_routing_fingerprint: fp,
+            expected_profile_id: "p0",
+            expected_profile_version: 1,
+            kafka_topic: topic,
+            kafka_partition: partition,
+            kafka_offset: offset,
+        }
     }
 
     fn tmpdir(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -1551,6 +2885,66 @@ mod tests {
     }
 
     #[test]
+    fn read_verified_payload_returns_stored_payload() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        assert_eq!(
+            j.read_verified_payload("e1"),
+            PayloadReadResult::Found(b"test-payload".to_vec())
+        );
+    }
+
+    #[test]
+    fn read_verified_payload_missing_blob_is_corrupted() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        tamper(&j, "DELETE FROM payload_blob WHERE event_id='e1'");
+        match j.read_verified_payload("e1") {
+            PayloadReadResult::Corrupted { event_id, detail } => {
+                assert_eq!(event_id, "e1");
+                assert!(detail.contains("payload blob not found"));
+            }
+            other => panic!("expected Corrupted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_verified_payload_rejects_blob_digest_mismatch() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        tamper(
+            &j,
+            "UPDATE payload_blob \
+             SET payload_digest=X'DEADBEEF00000000000000000000000000000000000000000000000000000000' \
+             WHERE event_id='e1'",
+        );
+        match j.read_verified_payload("e1") {
+            PayloadReadResult::Corrupted { event_id, detail } => {
+                assert_eq!(event_id, "e1");
+                assert!(detail.contains("differs from stored envelope digest"));
+            }
+            other => panic!("expected Corrupted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_verified_payload_rejects_payload_digest_mismatch() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        tamper(
+            &j,
+            "UPDATE payload_blob SET payload=X'DEAD' WHERE event_id='e1'",
+        );
+        match j.read_verified_payload("e1") {
+            PayloadReadResult::Corrupted { event_id, detail } => {
+                assert_eq!(event_id, "e1");
+                assert!(detail.contains("payload digest mismatch"));
+            }
+            other => panic!("expected Corrupted, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn corrupted_lifecycle_checksum_detected() {
         let j = mem();
         j.accept(&req("e1", 1));
@@ -1621,10 +3015,10 @@ mod tests {
     // --- Lifecycle status validation (Blocker: unsupported status strings) ---
 
     #[test]
-    fn replicated_status_with_valid_checksum_detected() {
+    fn unknown_delivery_status_with_valid_checksum_detected() {
         let j = mem();
         j.accept(&req("e1", 1));
-        tamper_lifecycle(&j, "e1", "REPLICATED", "PRESENT");
+        tamper_lifecycle(&j, "e1", "UNKNOWN_STATUS", "PRESENT");
         match j.get_status("e1") {
             StatusResult::Corrupted { detail, .. } => {
                 assert!(detail.contains("unsupported delivery status"));
@@ -1651,7 +3045,7 @@ mod tests {
         let j = mem();
         let r = req("e1", 1);
         assert!(matches!(j.accept(&r), AcceptResult::Accepted(_)));
-        tamper_lifecycle(&j, "e1", "REPLICATED", "PRESENT");
+        tamper_lifecycle(&j, "e1", "UNKNOWN_STATUS", "PRESENT");
         match j.accept(&r) {
             AcceptResult::Corrupted { event_id, detail } => {
                 assert_eq!(event_id, "e1");
@@ -1803,7 +3197,7 @@ mod tests {
     fn cas_after_unsupported_delivery_returns_corrupted() {
         let j = mem();
         j.accept(&req("e1", 1));
-        tamper_lifecycle(&j, "e1", "REPLICATED", "PRESENT");
+        tamper_lifecycle(&j, "e1", "UNKNOWN_STATUS", "PRESENT");
         match j.update_lifecycle(
             "e1",
             1,
@@ -1952,6 +3346,860 @@ mod tests {
         }
     }
 
+    // --- Sprint 5: Delivery state tests ---
+
+    #[test]
+    fn schema_v2_created_on_open() {
+        assert_eq!(mem().schema_version(), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 2);
+    }
+
+    #[test]
+    fn create_delivery_pending_succeeds() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        assert_eq!(
+            j.create_delivery_pending("e1", &fp, "p0-profile", 1, topic()),
+            CasResult::Updated
+        );
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Found(ds) => {
+                assert_eq!(ds.delivery_status, "DELIVERY_PENDING");
+                assert_eq!(ds.attempt_count, 0);
+                assert_eq!(ds.delivery_revision, 1);
+                assert!(ds.profile_id.as_deref() == Some("p0-profile"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_delivery_pending_nonexistent_event() {
+        let j = mem();
+        let fp = craftrelay_domain::sha256(b"routing");
+        assert_eq!(
+            j.create_delivery_pending("missing", &fp, "p0", 1, topic()),
+            CasResult::NotFound
+        );
+    }
+
+    #[test]
+    fn create_delivery_pending_sql_error_is_not_hidden_as_not_found() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        tamper(
+            &j,
+            "ALTER TABLE stored_envelope RENAME TO stored_envelope_corrupt",
+        );
+
+        assert!(matches!(
+            j.create_delivery_pending("e1", &fp, "p0", 1, topic()),
+            CasResult::Error(_)
+        ));
+    }
+
+    #[test]
+    fn record_delivery_attempt_increments_count() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        let attempt = DeliveryAttemptRecord {
+            event_id: "e1".into(),
+            attempt_number: 1,
+            outcome: "TRANSIENT_FAILURE".into(),
+            error_code: Some("BROKER_UNAVAILABLE".into()),
+            kafka_topic: None,
+            kafka_partition: None,
+            kafka_offset: None,
+            profile_id: Some("p0".into()),
+            profile_version: Some(1),
+            attempted_at_ms: 1000,
+        };
+        assert_eq!(j.record_delivery_attempt(&attempt), CasResult::Updated);
+        assert_eq!(delivery_attempt_count(&j, "e1"), 1);
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Found(ds) => {
+                assert_eq!(ds.attempt_count, 1);
+                assert_eq!(ds.last_error.as_deref(), Some("BROKER_UNAVAILABLE"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_delivery_attempt_state_update_zero_rows_is_not_updated() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        tamper(
+            &j,
+            "CREATE TRIGGER delivery_attempt_revision_race \
+             AFTER INSERT ON delivery_attempt \
+             BEGIN \
+                UPDATE delivery_state \
+                SET delivery_revision = delivery_revision + 1 \
+                WHERE event_id = NEW.event_id; \
+             END;",
+        );
+        let attempt = DeliveryAttemptRecord {
+            event_id: "e1".into(),
+            attempt_number: 1,
+            outcome: "TRANSIENT_FAILURE".into(),
+            error_code: Some("BROKER_UNAVAILABLE".into()),
+            kafka_topic: None,
+            kafka_partition: None,
+            kafka_offset: None,
+            profile_id: Some("p0".into()),
+            profile_version: Some(1),
+            attempted_at_ms: 1000,
+        };
+
+        assert_eq!(
+            j.record_delivery_attempt(&attempt),
+            CasResult::StaleRevision
+        );
+        assert_eq!(delivery_attempt_count(&j, "e1"), 0);
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Found(ds) => {
+                assert_eq!(ds.delivery_revision, 1);
+                assert_eq!(ds.attempt_count, 0);
+                assert!(ds.last_error.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirm_replicated_delivery_succeeds() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        assert_eq!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 42)),
+            CasResult::Updated
+        );
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Found(ds) => {
+                assert_eq!(ds.delivery_status, "REPLICATED");
+                assert_eq!(ds.kafka_partition, Some(0));
+                assert_eq!(ds.kafka_offset, Some(42));
+                assert!(ds.confirmed_at_ms.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
+        match j.get_status("e1") {
+            StatusResult::Found(s) => {
+                assert_eq!(s.delivery_status, "REPLICATED");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn replicated_state_missing_kafka_partition_with_valid_checksum_is_corrupted() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        assert_eq!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 42)),
+            CasResult::Updated
+        );
+        tamper_delivery_state_with_valid_checksum(&j, "e1", |state| {
+            state.kafka_partition = None;
+        });
+
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Corrupted { event_id, detail } => {
+                assert_eq!(event_id, "e1");
+                assert!(detail.contains("kafka_partition"));
+            }
+            other => panic!("expected corrupted replicated state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replicated_state_missing_kafka_offset_with_valid_checksum_is_corrupted() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        assert_eq!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 42)),
+            CasResult::Updated
+        );
+        tamper_delivery_state_with_valid_checksum(&j, "e1", |state| {
+            state.kafka_offset = None;
+        });
+
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Corrupted { event_id, detail } => {
+                assert_eq!(event_id, "e1");
+                assert!(detail.contains("kafka_offset"));
+            }
+            other => panic!("expected corrupted replicated state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replicated_state_missing_kafka_topic_with_valid_checksum_is_corrupted() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        assert_eq!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 42)),
+            CasResult::Updated
+        );
+        tamper_delivery_state_with_valid_checksum(&j, "e1", |state| {
+            state.kafka_topic = None;
+        });
+
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Corrupted { event_id, detail } => {
+                assert_eq!(event_id, "e1");
+                assert!(detail.contains("kafka_topic"));
+            }
+            other => panic!("expected corrupted replicated state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replicated_state_missing_confirmed_at_with_valid_checksum_is_corrupted() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        assert_eq!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 42)),
+            CasResult::Updated
+        );
+        tamper_delivery_state_with_valid_checksum(&j, "e1", |state| {
+            state.confirmed_at_ms = None;
+        });
+
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Corrupted { event_id, detail } => {
+                assert_eq!(event_id, "e1");
+                assert!(detail.contains("confirmed_at_ms"));
+            }
+            other => panic!("expected corrupted replicated state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pending_state_with_confirmed_kafka_metadata_and_valid_checksum_is_corrupted() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        tamper_delivery_state_with_valid_checksum(&j, "e1", |state| {
+            state.kafka_partition = Some(0);
+            state.kafka_offset = Some(42);
+            state.confirmed_at_ms = Some(1234);
+        });
+
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Corrupted { event_id, detail } => {
+                assert_eq!(event_id, "e1");
+                assert!(detail.contains("kafka_partition"));
+            }
+            other => panic!("expected corrupted pending state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirm_replicated_delivery_stale_revision() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        assert_eq!(
+            j.confirm_replicated_delivery("e1", 99, confirmation(&fp, topic(), 0, 1)),
+            CasResult::StaleRevision
+        );
+    }
+
+    #[test]
+    fn block_delivery_succeeds() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        assert_eq!(
+            j.block_delivery("e1", 1, "permanent broker failure"),
+            CasResult::Updated
+        );
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Found(ds) => {
+                assert_eq!(ds.delivery_status, "DELIVERY_BLOCKED");
+                assert_eq!(
+                    ds.blocked_reason.as_deref(),
+                    Some("permanent broker failure")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_delivery_retry_succeeds() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        assert_eq!(j.update_delivery_retry("e1", 1, 5000), CasResult::Updated);
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Found(ds) => {
+                assert_eq!(ds.delivery_status, "DELIVERY_RETRYING");
+                assert_eq!(ds.next_retry_at_ms, Some(5000));
+                assert_eq!(ds.delivery_revision, 2);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn scan_pending_deliveries_ordered() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        j.accept(&req("e2", 2));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        j.create_delivery_pending("e2", &fp, "p0", 1, topic());
+        let pending = match j.scan_pending_deliveries(10) {
+            DeliveryScanResult::Ok(pending) => pending,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].event_id, "e1");
+        assert_eq!(pending[1].event_id, "e2");
+        assert!(pending[0].journal_sequence < pending[1].journal_sequence);
+    }
+
+    #[test]
+    fn scan_pending_deliveries_respects_limit() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        j.accept(&req("e2", 2));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        j.create_delivery_pending("e2", &fp, "p0", 1, topic());
+        let pending = match j.scan_pending_deliveries(1) {
+            DeliveryScanResult::Ok(pending) => pending,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn delivery_candidate_returns_verified_envelope_and_state() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+
+        match j.get_delivery_candidate("e1") {
+            DeliveryCandidateResult::Found(candidate) => {
+                assert_eq!(candidate.event_id, "e1");
+                assert_eq!(candidate.installation_id, "inst-a");
+                assert_eq!(candidate.namespace, "economy");
+                assert_eq!(candidate.logical_stream_type, "account");
+                assert_eq!(candidate.stream_key, "player-1");
+                assert_eq!(candidate.stream_sequence, 1);
+                assert_eq!(candidate.event_type, "transfer");
+                assert_eq!(candidate.routing_version, 1);
+                assert_eq!(candidate.delivery_state.delivery_status, "DELIVERY_PENDING");
+            }
+            other => panic!("expected candidate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delivery_candidate_rejects_corrupt_envelope() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        tamper(
+            &j,
+            "UPDATE stored_envelope SET namespace='HACKED' WHERE event_id='e1'",
+        );
+
+        match j.get_delivery_candidate("e1") {
+            DeliveryCandidateResult::Corrupted { event_id, detail } => {
+                assert_eq!(event_id, "e1");
+                assert!(detail.contains("envelope checksum mismatch"));
+            }
+            other => panic!("expected Corrupted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delivery_candidate_rejects_missing_envelope_for_delivery_state() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        tamper(&j, "DELETE FROM stored_envelope WHERE event_id='e1'");
+
+        match j.get_delivery_candidate("e1") {
+            DeliveryCandidateResult::Corrupted { event_id, detail } => {
+                assert_eq!(event_id, "e1");
+                assert!(detail.contains("stored envelope missing"));
+            }
+            other => panic!("expected Corrupted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scan_retrying_deliveries_filters_by_time() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        j.update_delivery_retry("e1", 1, 5000);
+        assert_eq!(
+            match j.scan_retrying_deliveries(1000, 10) {
+                DeliveryScanResult::Ok(pending) => pending.len(),
+                other => panic!("{other:?}"),
+            },
+            0
+        );
+        assert_eq!(
+            match j.scan_retrying_deliveries(5000, 10) {
+                DeliveryScanResult::Ok(pending) => pending.len(),
+                other => panic!("{other:?}"),
+            },
+            1
+        );
+        assert_eq!(
+            match j.scan_retrying_deliveries(9999, 10) {
+                DeliveryScanResult::Ok(pending) => pending.len(),
+                other => panic!("{other:?}"),
+            },
+            1
+        );
+    }
+
+    #[test]
+    fn corrupt_delivery_row_in_pending_scan_is_not_hidden() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        tamper(
+            &j,
+            "UPDATE delivery_state SET delivery_checksum=X'00' WHERE event_id='e1'",
+        );
+
+        match j.scan_pending_deliveries(10) {
+            DeliveryScanResult::Corrupted { event_id, .. } => {
+                assert_eq!(event_id.as_deref(), Some("e1"));
+            }
+            other => panic!("expected scan corruption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn corrupt_delivery_row_in_retry_scan_is_not_hidden() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        j.update_delivery_retry("e1", 1, 5000);
+        tamper(
+            &j,
+            "UPDATE delivery_state SET delivery_checksum=X'00' WHERE event_id='e1'",
+        );
+
+        assert!(matches!(
+            j.scan_retrying_deliveries(5000, 10),
+            DeliveryScanResult::Corrupted { .. }
+        ));
+    }
+
+    #[test]
+    fn corrupt_delivery_row_in_gate_scan_is_not_hidden() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        tamper(
+            &j,
+            "UPDATE delivery_state SET delivery_checksum=X'00' WHERE event_id='e1'",
+        );
+
+        assert!(matches!(
+            j.scan_delivery_gate_states(10),
+            DeliveryScanResult::Corrupted { .. }
+        ));
+    }
+
+    #[test]
+    fn corrupt_envelope_in_gate_scan_is_not_hidden() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        tamper(
+            &j,
+            "UPDATE stored_envelope SET stream_key='fake-stream' WHERE event_id='e1'",
+        );
+
+        match j.scan_delivery_gate_states(10) {
+            DeliveryScanResult::Corrupted { event_id, detail } => {
+                assert_eq!(event_id.as_deref(), Some("e1"));
+                assert!(detail.contains("envelope checksum mismatch"));
+            }
+            other => panic!("expected scan corruption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_envelope_in_gate_scan_is_not_hidden() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        tamper(&j, "DELETE FROM stored_envelope WHERE event_id='e1'");
+
+        match j.scan_delivery_gate_states(10) {
+            DeliveryScanResult::Corrupted { event_id, detail } => {
+                assert_eq!(event_id.as_deref(), Some("e1"));
+                assert!(detail.contains("stored envelope missing"));
+            }
+            other => panic!("expected scan corruption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_delivery_status_in_gate_scan_is_not_hidden() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        tamper(
+            &j,
+            "UPDATE delivery_state SET delivery_status='BROKEN' WHERE event_id='e1'",
+        );
+
+        match j.scan_delivery_gate_states(10) {
+            DeliveryScanResult::Corrupted { event_id, detail } => {
+                assert_eq!(event_id.as_deref(), Some("e1"));
+                assert!(detail.contains("unsupported delivery state status"));
+            }
+            other => panic!("expected scan corruption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_delivery_state_not_found() {
+        let j = mem();
+        assert!(matches!(
+            j.get_delivery_state("missing"),
+            DeliveryStateResult::NotFound
+        ));
+    }
+
+    #[test]
+    fn delivery_state_fk_requires_envelope() {
+        let j = mem();
+        let fp = craftrelay_domain::sha256(b"routing");
+        assert_eq!(
+            j.create_delivery_pending("orphan", &fp, "p0", 1, topic()),
+            CasResult::NotFound
+        );
+    }
+
+    #[test]
+    fn confirm_also_updates_lifecycle_to_replicated() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 10));
+        match j.get_status("e1") {
+            StatusResult::Found(s) => {
+                assert_eq!(s.delivery_status, "REPLICATED");
+                assert_eq!(s.lifecycle_revision, 2);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_also_updates_lifecycle() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        j.block_delivery("e1", 1, "test");
+        match j.get_status("e1") {
+            StatusResult::Found(s) => {
+                assert_eq!(s.delivery_status, "DELIVERY_BLOCKED");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirm_replicated_missing_lifecycle_does_not_mutate_delivery() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        tamper(&j, "DELETE FROM lifecycle_state WHERE event_id='e1'");
+
+        assert!(matches!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 42)),
+            CasResult::Corrupted { .. }
+        ));
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Found(ds) => assert_eq!(ds.delivery_status, "DELIVERY_PENDING"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirm_replicated_corrupt_lifecycle_checksum_does_not_return_updated() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        tamper(
+            &j,
+            "UPDATE lifecycle_state SET lifecycle_checksum=X'00' WHERE event_id='e1'",
+        );
+
+        assert!(matches!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 42)),
+            CasResult::Corrupted { .. }
+        ));
+    }
+
+    #[test]
+    fn confirm_replicated_stale_lifecycle_update_rolls_back_delivery() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        tamper(
+            &j,
+            "CREATE TRIGGER lifecycle_revision_race \
+             AFTER UPDATE OF delivery_status ON delivery_state \
+             WHEN NEW.event_id='e1' AND NEW.delivery_status='REPLICATED' \
+             BEGIN \
+                UPDATE lifecycle_state \
+                SET revision = revision + 1 \
+                WHERE event_id = NEW.event_id; \
+             END",
+        );
+
+        assert_eq!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 42)),
+            CasResult::StaleRevision
+        );
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Found(ds) => {
+                assert_eq!(ds.delivery_status, "DELIVERY_PENDING");
+                assert_eq!(ds.kafka_offset, None);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_delivery_missing_lifecycle_does_not_mutate_delivery() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        tamper(&j, "DELETE FROM lifecycle_state WHERE event_id='e1'");
+
+        assert!(matches!(
+            j.block_delivery("e1", 1, "operator block"),
+            CasResult::Corrupted { .. }
+        ));
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Found(ds) => assert_eq!(ds.delivery_status, "DELIVERY_PENDING"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_delivery_corrupt_lifecycle_checksum_does_not_return_updated() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        tamper(
+            &j,
+            "UPDATE lifecycle_state SET lifecycle_checksum=X'00' WHERE event_id='e1'",
+        );
+
+        assert!(matches!(
+            j.block_delivery("e1", 1, "operator block"),
+            CasResult::Corrupted { .. }
+        ));
+    }
+
+    #[test]
+    fn duplicate_confirm_is_idempotent() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        assert_eq!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 42)),
+            CasResult::Updated
+        );
+        assert_eq!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 42)),
+            CasResult::AlreadyConfirmed
+        );
+    }
+
+    #[test]
+    fn duplicate_confirm_after_reopen_is_idempotent() {
+        let (dir, path) = tmpdir("cr-j-dup-confirm");
+        let fp = craftrelay_domain::sha256(b"routing");
+        {
+            let j = LocalJournal::open(&path, cfg(), Box::new(AlwaysSafeDiskGuard)).unwrap();
+            j.accept(&req("e1", 1));
+            j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+            assert_eq!(
+                j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 42)),
+                CasResult::Updated
+            );
+        }
+        let j = LocalJournal::open(&path, cfg(), Box::new(AlwaysSafeDiskGuard)).unwrap();
+        assert_eq!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 42)),
+            CasResult::AlreadyConfirmed
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn duplicate_confirm_with_different_offset_is_rejected_without_mutation() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        assert_eq!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 42)),
+            CasResult::Updated
+        );
+        match j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 43)) {
+            CasResult::Corrupted { detail, .. } => {
+                assert!(detail.contains("conflicting replicated confirmation"));
+            }
+            other => panic!("expected Corrupted, got {other:?}"),
+        }
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Found(ds) => assert_eq!(ds.kafka_offset, Some(42)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_confirm_with_different_topic_is_rejected_without_mutation() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        assert_eq!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 42)),
+            CasResult::Updated
+        );
+        assert!(matches!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, "wrong-topic", 0, 42)),
+            CasResult::Corrupted { .. }
+        ));
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Found(ds) => assert_eq!(ds.kafka_topic.as_deref(), Some(topic())),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirm_with_wrong_topic_is_rejected_by_journal() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        assert!(matches!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, "wrong-topic", 0, 42)),
+            CasResult::Corrupted { .. }
+        ));
+        match j.get_delivery_state("e1") {
+            DeliveryStateResult::Found(ds) => assert_eq!(ds.delivery_status, "DELIVERY_PENDING"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn delivery_state_tamper_is_detected() {
+        let cases = [
+            "UPDATE delivery_state SET delivery_status='REPLICATED' WHERE event_id='e1'",
+            "UPDATE delivery_state SET attempt_count=99 WHERE event_id='e1'",
+            "UPDATE delivery_state SET routing_fingerprint=X'010203' WHERE event_id='e1'",
+            "UPDATE delivery_state SET profile_id='other' WHERE event_id='e1'",
+            "UPDATE delivery_state SET profile_version=99 WHERE event_id='e1'",
+            "UPDATE delivery_state SET kafka_topic='wrong-topic' WHERE event_id='e1'",
+            "UPDATE delivery_state SET kafka_partition=7 WHERE event_id='e1'",
+            "UPDATE delivery_state SET kafka_offset=8 WHERE event_id='e1'",
+            "UPDATE delivery_state SET delivery_checksum=X'AA' WHERE event_id='e1'",
+        ];
+
+        for sql in cases {
+            let j = mem();
+            j.accept(&req("e1", 1));
+            let fp = craftrelay_domain::sha256(b"routing");
+            j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+            tamper(&j, sql);
+            match j.get_delivery_state("e1") {
+                DeliveryStateResult::Corrupted { .. } => {}
+                other => panic!("{sql}: expected Corrupted, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn corrupted_delivery_state_cannot_transition() {
+        let j = mem();
+        j.accept(&req("e1", 1));
+        let fp = craftrelay_domain::sha256(b"routing");
+        j.create_delivery_pending("e1", &fp, "p0", 1, topic());
+        tamper(
+            &j,
+            "UPDATE delivery_state SET attempt_count=99 WHERE event_id='e1'",
+        );
+
+        assert!(matches!(
+            j.confirm_replicated_delivery("e1", 1, confirmation(&fp, topic(), 0, 42)),
+            CasResult::Corrupted { .. }
+        ));
+        assert!(matches!(
+            j.block_delivery("e1", 1, "blocked"),
+            CasResult::Corrupted { .. }
+        ));
+        assert!(matches!(
+            j.update_delivery_retry("e1", 1, 5000),
+            CasResult::Corrupted { .. }
+        ));
+        assert!(matches!(
+            j.get_delivery_state("e1"),
+            DeliveryStateResult::Corrupted { .. }
+        ));
+    }
+
     // --- FK enforcement (Blocker 4) ---
 
     #[test]
@@ -2019,8 +4267,65 @@ mod tests {
     fn tamper(j: &LocalJournal, sql: &str) {
         let conn = j.conn.lock().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
-        conn.execute(sql, []).unwrap();
+        conn.execute_batch(sql).unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    }
+
+    fn tamper_delivery_state_with_valid_checksum<F>(j: &LocalJournal, event_id: &str, mutate: F)
+    where
+        F: FnOnce(&mut DeliveryStateRecord),
+    {
+        let conn = j.conn.lock().unwrap();
+        let mut state = match load_delivery_state(&conn, event_id) {
+            DeliveryStateResult::Found(state) => *state,
+            other => panic!("expected delivery state before tamper, got {other:?}"),
+        };
+        mutate(&mut state);
+        state.delivery_checksum = compute_delivery_checksum(&state);
+        let routing_fingerprint = state.routing_fingerprint.map(|value| value.to_vec());
+
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        conn.execute(
+            "UPDATE delivery_state SET \
+             delivery_status = ?1, attempt_count = ?2, next_retry_at_ms = ?3, \
+             last_error = ?4, blocked_reason = ?5, kafka_topic = ?6, \
+             kafka_partition = ?7, kafka_offset = ?8, routing_fingerprint = ?9, \
+             profile_id = ?10, profile_version = ?11, delivery_revision = ?12, \
+             delivery_checksum = ?13, confirmed_at_ms = ?14, \
+             created_at_ms = ?15, updated_at_ms = ?16 \
+             WHERE event_id = ?17",
+            params![
+                state.delivery_status,
+                state.attempt_count,
+                state.next_retry_at_ms,
+                state.last_error,
+                state.blocked_reason,
+                state.kafka_topic,
+                state.kafka_partition,
+                state.kafka_offset,
+                routing_fingerprint,
+                state.profile_id,
+                state.profile_version,
+                state.delivery_revision,
+                state.delivery_checksum.as_slice(),
+                state.confirmed_at_ms,
+                state.created_at_ms,
+                state.updated_at_ms,
+                event_id,
+            ],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    }
+
+    fn delivery_attempt_count(j: &LocalJournal, event_id: &str) -> i64 {
+        let conn = j.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM delivery_attempt WHERE event_id = ?1",
+            params![event_id],
+            |row| row.get(0),
+        )
+        .unwrap()
     }
 
     fn tamper_lifecycle(j: &LocalJournal, event_id: &str, delivery: &str, retention: &str) {
